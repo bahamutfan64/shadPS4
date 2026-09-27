@@ -240,6 +240,7 @@ private:
     /// Counts command buffer resumptions; a new value means new guest data may be in use.
     u64 resume_serial{};
     std::atomic<u32> num_commands{};
+    bool flip_signal_armed{};
     std::atomic<bool> submit_done{};
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
