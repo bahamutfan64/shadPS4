@@ -931,6 +931,10 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             if (u64(width) * height < 256 * 256 && info.guest_size >= 16_MB) {
                 return "tiny face with a huge footprint";
             }
+            // No real PS4 texture needs this much memory (seen: 12529x15676 with 11 mips).
+            if (info.guest_size > 512_MB) {
+                return "guest footprint over 512 MB";
+            }
             if (!IsMapped(info.guest_address, info.guest_size)) {
                 return "memory range not mapped";
             }

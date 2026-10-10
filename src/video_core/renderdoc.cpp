@@ -93,31 +93,15 @@ void LoadRenderDoc() {
     }
 }
 
-void StartCapture() {
-    if (!rdoc_api) {
-        return;
-    }
+void StartCapture() {}
 
-    if (capture_state == CaptureState::Triggered) {
-        rdoc_api->StartFrameCapture(nullptr, nullptr);
-        capture_state = CaptureState::InProgress;
-    }
-}
-
-void EndCapture() {
-    if (!rdoc_api) {
-        return;
-    }
-
-    if (capture_state == CaptureState::InProgress) {
-        rdoc_api->EndFrameCapture(nullptr, nullptr);
-        capture_state = CaptureState::Idle;
-    }
-}
+void EndCapture() {}
 
 void TriggerCapture() {
-    if (capture_state == CaptureState::Idle) {
-        capture_state = CaptureState::Triggered;
+    // Let RenderDoc bracket the capture itself, from one present to the next: that takes in
+    // every queue submission of the frame, which a bracket placed on the GPU thread did not.
+    if (rdoc_api) {
+        rdoc_api->TriggerCapture();
     }
 }
 
