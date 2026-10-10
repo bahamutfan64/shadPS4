@@ -95,7 +95,8 @@ void TriggerCapture() {
     // Let RenderDoc bracket the capture itself, from one present to the next: that takes in
     // every queue submission of the frame, which a bracket placed on the GPU thread did not.
     if (rdoc_api) {
-        rdoc_api->TriggerCapture();
+        // Several frames in a row: the game may draw only every other present.
+        rdoc_api->TriggerMultiFrameCapture(8);
     }
 }
 
