@@ -334,6 +334,15 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             return {merged_image_id, -1, -1};
         }
 
+        // The same texture described again with a different pitch: dimensions, format and
+        // subresources match and only the padded guest size differs. Reuse the cached image.
+        if (image_info.type == cache_image.info.type &&
+            image_info.size == cache_image.info.size &&
+            image_info.resources.levels == cache_image.info.resources.levels &&
+            image_info.resources.layers == cache_image.info.resources.layers) {
+            return {merged_image_id ? merged_image_id : cache_image_id, -1, -1};
+        }
+
         // Enhanced debug logging for unreachable case
         // Calculate expected size based on format and dimensions
         u64 expected_size =
