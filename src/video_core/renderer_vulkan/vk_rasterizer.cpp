@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <unordered_set>
 
 #include "common/debug.h"
 #include "core/debug_state.h"
@@ -939,6 +940,23 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             BindNullImage(image_bindings[num_images++], image_desc);
             image_descriptor_array_sizes.push_back(1);
             continue;
+        }
+
+        // Diagnostic: report each large texture a shader binds, once, to see what fills memory.
+        if (const VideoCore::ImageInfo big_info{tsharp, image_desc};
+            big_info.guest_size >= 32_MB) {
+            static std::unordered_set<u64> reported;
+            const u64 key = big_info.guest_address ^ (u64(big_info.guest_size) << 40);
+            if (reported.insert(key).second) {
+                LOG_WARNING(Render_Vulkan,
+                            "Large T# accepted: address={:#x} size={} MB {}x{}x{} levels={} "
+                            "layers={} data_format={} num_format={} tile={} written={}",
+                            big_info.guest_address, big_info.guest_size >> 20,
+                            big_info.size.width, big_info.size.height, big_info.size.depth,
+                            big_info.resources.levels, big_info.resources.layers,
+                            static_cast<u32>(data_fmt), static_cast<u32>(num_fmt),
+                            static_cast<u32>(big_info.tile_mode), image_desc.is_written);
+            }
         }
 
         const Shader::MipStorageFallbackMode mip_fallback_mode = image_desc.mip_fallback_mode;
