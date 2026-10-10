@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/logging/log.h"
 #include "shader_recompiler/frontend/translate/translate.h"
 
 namespace Shader::Gcn {
@@ -232,10 +233,35 @@ void Translator::BUFFER_LOAD(u32 num_dwords, bool is_inst_typed, bool is_buffer_
     }
     buffer_info.pc.Assign(pc);
 
+    const IR::VectorReg dst_reg{inst.src[1].code};
+    if (mubuf.addr64 && !buffer_info.typed && scalar_width == 32) {
+        // ADDR64: the address is a 64-bit pointer in two VGPRs, plus the descriptor base (normally
+        // zero), soffset and the instruction offset. Such a per-lane address cannot be a Vulkan
+        // binding, so read each dword through the DMA page table like a dynamic ReadConst.
+        // (Tearaway Unfolded reads its skinning matrices this way.)
+        const IR::U64 ptr = ir.PackUint2x32(
+            ir.CompositeConstruct(ir.GetVectorReg(vaddr), ir.GetVectorReg(vaddr + 1)));
+        const IR::U64 base = ir.PackUint2x32(ir.CompositeConstruct(
+            ir.GetScalarReg(sharp), ir.BitwiseAnd(ir.GetScalarReg(sharp + 1), ir.Imm32(0xffffu))));
+        const IR::U64 byte_offset = ir.PackUint2x32(
+            ir.CompositeConstruct(ir.IAdd(soffset, ir.Imm32(mubuf.offset)), ir.Imm32(0u)));
+        const IR::Value addr_pair =
+            ir.UnpackUint2x32(IR::U64{ir.IAdd(IR::U64{ir.IAdd(ptr, base)}, byte_offset)});
+        const IR::Value addr = ir.CompositeConstruct(IR::U32{ir.CompositeExtract(addr_pair, 0)},
+                                                     IR::U32{ir.CompositeExtract(addr_pair, 1)});
+        for (u32 i = 0; i < num_dwords; i++) {
+            ir.SetVectorReg(dst_reg + i, ir.ReadConst(addr, ir.Imm32(i)));
+        }
+        return;
+    }
+    if (mubuf.addr64) {
+        LOG_WARNING(Render_Recompiler, "ADDR64 buffer load with typed or sub-dword data is not "
+                                       "implemented, treating it as descriptor relative");
+    }
+
     const IR::Value handle =
         ir.CompositeConstruct(ir.GetScalarReg(sharp), ir.GetScalarReg(sharp + 1),
                               ir.GetScalarReg(sharp + 2), ir.GetScalarReg(sharp + 3));
-    const IR::VectorReg dst_reg{inst.src[1].code};
     if (buffer_info.typed) {
         const IR::Value value = ir.LoadBufferFormat(handle, address, buffer_info);
         for (u32 i = 0; i < num_dwords; i++) {
@@ -275,6 +301,10 @@ void Translator::BUFFER_LOAD(u32 num_dwords, bool is_inst_typed, bool is_buffer_
 void Translator::BUFFER_STORE(u32 num_dwords, bool is_inst_typed, bool is_buffer_typed,
                               const GcnInst& inst, u32 scalar_width) {
     const auto& mubuf = inst.control.mubuf;
+    if (mubuf.addr64) {
+        LOG_WARNING(Render_Recompiler,
+                    "ADDR64 buffer store is not implemented, treating it as descriptor relative");
+    }
     const IR::VectorReg vaddr{inst.src[0].code};
     const IR::ScalarReg sharp{inst.src[2].code * 4};
 
