@@ -6,6 +6,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "core/libraries/ime/error_dialog.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/system/msgdialog.h"
 #include "imgui_internal.h"
@@ -78,6 +79,16 @@ Error PS4_SYSV_ABI sceMsgDialogOpen(const OrbisParam* param) {
     ASSERT(param->size == sizeof(OrbisParam));
     ASSERT(param->baseParam.size == sizeof(CommonDialog::BaseParam));
     g_result = {};
+    // Answer "No" to the sign-in retry question that follows a skipped PSN signed out error.
+    if (ErrorDialog::g_skipped_np_signed_out_dialog.exchange(false) &&
+        param->mode == MsgDialogMode::USER_MSG && param->userMsgParam != nullptr &&
+        (param->userMsgParam->buttonType == ButtonType::YESNO ||
+         param->userMsgParam->buttonType == ButtonType::YESNO_FOCUS_NO)) {
+        LOG_INFO(Lib_MsgDlg, "Answering No to the PSN sign-in retry dialog");
+        g_result.buttonId = ButtonId::NO;
+        g_status = Status::FINISHED;
+        return Error::OK;
+    }
     g_state = MsgDialogState{*param};
     g_status = Status::RUNNING;
     g_msg_dialog_ui = MsgDialogUi(&g_state, &g_status, &g_result);

@@ -23,6 +23,8 @@ using CommonDialog::Error;
 using CommonDialog::Result;
 using CommonDialog::Status;
 
+std::atomic_bool g_skipped_np_signed_out_dialog{false};
+
 class ErrorDialogUi final : public ImGui::Layer {
     bool first_render{false};
 
@@ -157,6 +159,15 @@ Error PS4_SYSV_ABI sceErrorDialogOpen(const Param* param) {
     const auto err = static_cast<u32>(param->errorCode);
     LOG_DEBUG(Lib_ErrorDialog, "called param->errorCode = {:#x}", err);
     ASSERT(param->size == sizeof(Param));
+
+    // ORBIS_NP_ERROR_SIGNED_OUT: there is no PSN to sign in to, so do not make the user
+    // dismiss a dialog about it.
+    if (err == 0x80550006) {
+        LOG_INFO(Lib_ErrorDialog, "Skipping PSN signed out error dialog");
+        g_skipped_np_signed_out_dialog = true;
+        g_status = Status::FINISHED;
+        return Error::OK;
+    }
 
     const std::string err_message = fmt::format("An error has occurred. \nCode: {:#X}", err);
     g_status = Status::RUNNING;

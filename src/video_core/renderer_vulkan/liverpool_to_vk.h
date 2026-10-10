@@ -106,6 +106,13 @@ constexpr vk::Format SurfaceFormat(AmdGpu::DataFormat data_format,
     return result;
 }
 
+/// Returns true if the format pair has a Vulkan equivalent, without asserting.
+inline bool IsSurfaceFormatKnown(AmdGpu::DataFormat data_format,
+                                 AmdGpu::NumberFormat num_format) noexcept {
+    return surface_format_table[GetSurfaceFormatTableIndex(data_format, num_format)] !=
+           vk::Format::eUndefined;
+}
+
 static inline bool IsFormatDepthCompatible(vk::Format fmt) {
     switch (fmt) {
     // 32-bit float compatible

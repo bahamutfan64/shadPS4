@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include "common/types.h"
 #include "core/libraries/system/commondialog.h"
 
@@ -14,6 +16,10 @@ namespace Libraries::ErrorDialog {
 using OrbisUserServiceUserId = s32;
 
 struct Param;
+
+/// Set when the "signed out of PSN" error dialog was skipped, so that the sign-in retry
+/// question a game shows right after it can be answered "No" without user input.
+extern std::atomic_bool g_skipped_np_signed_out_dialog;
 
 CommonDialog::Error PS4_SYSV_ABI sceErrorDialogClose();
 CommonDialog::Status PS4_SYSV_ABI sceErrorDialogGetStatus();
