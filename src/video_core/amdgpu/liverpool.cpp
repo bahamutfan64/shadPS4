@@ -106,8 +106,6 @@ void Liverpool::Process(std::stop_token stoken) {
             break;
         }
 
-        VideoCore::StartCapture();
-
         curr_qid = -1;
 
         while (num_submits || num_commands) {
@@ -144,8 +142,10 @@ void Liverpool::Process(std::stop_token stoken) {
                 rasterizer->OnSubmit();
                 rasterizer->Flush();
             }
-            // After the flush, so the frame's own command buffer is part of the capture.
+            // A capture covers one whole guest frame: from one submit-done to the next, flush
+            // included, so that the frame's own command buffers are part of it.
             VideoCore::EndCapture();
+            VideoCore::StartCapture();
             submit_done = false;
         }
 
