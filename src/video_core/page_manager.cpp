@@ -39,7 +39,7 @@ namespace VideoCore {
 
 struct PageManager::Impl {
     struct PageState {
-        u8 num_write_watchers;
+        u16 num_write_watchers;
         u8 num_read_watchers;
 
         Core::MemoryPermission WritePerm() const noexcept {
@@ -57,7 +57,7 @@ struct PageManager::Impl {
         }
 
         template <bool is_read>
-        u8 GetPage() const {
+        u16 GetPage() const {
             if constexpr (is_read) {
                 return num_read_watchers;
             } else {
@@ -78,7 +78,7 @@ struct PageManager::Impl {
             }
             if (update_write) {
                 if (write_op == PageOp::Track) {
-                    ASSERT_MSG(num_write_watchers < 255, "Too many watchers");
+                    ASSERT_MSG(num_write_watchers < 0xffff, "Too many watchers");
                 } else if (write_op == PageOp::Untrack) {
                     ASSERT_MSG(num_write_watchers > 0, "Not enough watchers");
                 }
