@@ -21,7 +21,7 @@ namespace Shader {
 /// hold arbitrary data. Such a slot must read as a null image everywhere (specialization,
 /// recompilation, pipeline layout and binding), otherwise those disagree on the resource layout.
 /// This only checks properties no real texture can violate.
-constexpr bool IsPlausibleImageSharp(const AmdGpu::Image& image) noexcept {
+inline bool IsPlausibleImageSharp(const AmdGpu::Image& image) noexcept {
     const auto data_fmt = static_cast<AmdGpu::DataFormat>(image.data_format);
     const auto num_fmt = static_cast<AmdGpu::NumberFormat>(image.num_format);
     if (!magic_enum::enum_contains(data_fmt) || !magic_enum::enum_contains(num_fmt) ||
