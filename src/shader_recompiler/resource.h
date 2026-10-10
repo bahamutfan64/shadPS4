@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <span>
 #include <type_traits>
 #include "common/types.h"
@@ -11,8 +13,44 @@
 #include "video_core/amdgpu/resource.h"
 
 #include <boost/container/static_vector.hpp>
+#include <magic_enum/magic_enum.hpp>
 
 namespace Shader {
+
+/// Shaders can declare textures they only sample behind a feature flag; the unused slots then
+/// hold arbitrary data. Such a slot must read as a null image everywhere (specialization,
+/// recompilation, pipeline layout and binding), otherwise those disagree on the resource layout.
+/// This only checks properties no real texture can violate.
+constexpr bool IsPlausibleImageSharp(const AmdGpu::Image& image) noexcept {
+    const auto data_fmt = static_cast<AmdGpu::DataFormat>(image.data_format);
+    const auto num_fmt = static_cast<AmdGpu::NumberFormat>(image.num_format);
+    if (!magic_enum::enum_contains(data_fmt) || !magic_enum::enum_contains(num_fmt) ||
+        !magic_enum::enum_contains(image.GetTileMode())) {
+        return false;
+    }
+    // The PS4's GPU can only handle 40 bit addresses.
+    if (image.Address() >= 0x10000000000ULL) {
+        return false;
+    }
+    const u32 width = image.width + 1;
+    const u32 height = image.height + 1;
+    if (image.Pitch() < width) {
+        return false;
+    }
+    const auto type = static_cast<AmdGpu::ImageType>(image.type);
+    const bool is_msaa =
+        type == AmdGpu::ImageType::Color2DMsaa || type == AmdGpu::ImageType::Color2DMsaaArray;
+    if (is_msaa) {
+        // last_level holds log2 of the sample count.
+        return image.last_level <= 3;
+    }
+    if (AmdGpu::IsFmask(data_fmt)) {
+        return false;
+    }
+    const u32 depth = type == AmdGpu::ImageType::Color3D ? u32(image.depth + 1) : 1u;
+    const u32 max_dim = std::max({width, height, depth});
+    return image.last_level < static_cast<u32>(std::bit_width(max_dim));
+}
 
 enum class GuardCompare : u8 {
     IEq,
@@ -205,7 +243,7 @@ struct ImageResource {
             image.type = u64(AmdGpu::ImageType::Color2DArray);
             image.depth = (image.depth + 1) * 6 - 1;
         }
-        if (!image.Valid()) {
+        if (!image.Valid() || (image.base_address != 0 && !IsPlausibleImageSharp(image))) {
             image = AmdGpu::Image::Null(is_depth);
         } else if (is_depth) {
             const auto data_fmt = image.GetDataFmt();
