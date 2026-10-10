@@ -831,11 +831,30 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             continue;
         }
 
-        if (!memory->IsValidGpuMapping(tsharp.Address(), 0) ||
-            !magic_enum::enum_contains(data_fmt) || !magic_enum::enum_contains(num_fmt) ||
-            !LiverpoolToVK::IsSurfaceFormatKnown(data_fmt, num_fmt)) {
-            // Shaders can declare textures they only sample behind a feature flag; the unused
-            // slots then hold arbitrary data that must not reach the texture cache.
+        // Shaders can declare textures they only sample behind a feature flag; the unused
+        // slots then hold arbitrary data that must not reach the texture cache.
+        const auto is_plausible_tsharp = [&] {
+            if (!memory->IsValidGpuMapping(tsharp.Address(), 0) ||
+                !magic_enum::enum_contains(data_fmt) || !magic_enum::enum_contains(num_fmt) ||
+                !LiverpoolToVK::IsSurfaceFormatKnown(data_fmt, num_fmt)) {
+                return false;
+            }
+            // The first byte must lie in memory the guest actually mapped.
+            if (!IsMapped(tsharp.Address(), 1)) {
+                return false;
+            }
+            const auto tile_mode = tsharp.GetTileMode();
+            if (!magic_enum::enum_contains(tile_mode)) {
+                return false;
+            }
+            const auto array_mode = AmdGpu::GetArrayMode(tile_mode);
+            if (array_mode == AmdGpu::ArrayMode::ArrayLinearGeneral) {
+                return false;
+            }
+            // The texture cache cannot size macro tiled block compressed images (it asserts).
+            return !(AmdGpu::IsMacroTiled(array_mode) && AmdGpu::IsBlockCoded(data_fmt));
+        };
+        if (!is_plausible_tsharp()) {
             LOG_WARNING(Render_Vulkan,
                         "Rejecting invalid T# address={:#x}, pitch={}, width={}, "
                         "data_format={}, num_format={}",
