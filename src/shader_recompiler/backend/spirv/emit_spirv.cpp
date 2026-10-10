@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <mutex>
 #include <span>
 #include <type_traits>
@@ -10,6 +11,7 @@
 
 #include "common/assert.h"
 #include "common/func_traits.h"
+#include "common/logging/log.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
@@ -20,6 +22,30 @@
 
 namespace Shader::Backend::SPIRV {
 namespace {
+
+/// Vulkan only guarantees 1024 total output components per geometry shader invocation
+/// (maxGeometryTotalOutputComponents). A guest shader that declares more vertices than fit in
+/// that budget makes the host GPU reject the program and the device is lost, so clamp the count.
+static u32 ClampGsOutputVertices(const EmitContext& ctx, u32 output_vertices) {
+    static constexpr u32 MaxTotalOutputComponents = 1024;
+    u32 components = 4; // gl_Position
+    for (const auto& param : ctx.output_params) {
+        if (Sirit::ValidId(param.id)) {
+            components += 4;
+        }
+    }
+    if (Sirit::ValidId(ctx.clip_distances)) {
+        components += MaxEmulatedClipDistances;
+    }
+    const u32 max_vertices = std::max(1u, MaxTotalOutputComponents / components);
+    if (output_vertices > max_vertices) {
+        LOG_WARNING(Render_Recompiler,
+                    "Clamping geometry shader {:#x} output vertices from {} to {} ({} components)",
+                    ctx.info.pgm_hash, output_vertices, max_vertices, components);
+        return max_vertices;
+    }
+    return output_vertices;
+}
 
 static constexpr spv::ExecutionMode GetInputPrimitiveType(AmdGpu::PrimitiveType type) {
     switch (type) {
@@ -444,7 +470,7 @@ void DefineEntryPoint(const Info& info, const RuntimeInfo& runtime_info, EmitCon
         ctx.AddExecutionMode(main, GetInputPrimitiveType(ctx.runtime_info.hw.gs.in_primitive));
         ctx.AddExecutionMode(main, GetOutputPrimitiveType(ctx.runtime_info.hw.gs.out_primitive[0]));
         ctx.AddExecutionMode(main, spv::ExecutionMode::OutputVertices,
-                             ctx.runtime_info.hw.gs.output_vertices);
+                             ClampGsOutputVertices(ctx, ctx.runtime_info.hw.gs.output_vertices));
         ctx.AddExecutionMode(main, spv::ExecutionMode::Invocations,
                              ctx.runtime_info.hw.gs.num_invocations);
         break;
