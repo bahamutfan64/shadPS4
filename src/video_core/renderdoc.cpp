@@ -19,12 +19,6 @@
 
 namespace VideoCore {
 
-enum class CaptureState {
-    Idle,
-    Triggered,
-    InProgress,
-};
-static CaptureState capture_state{CaptureState::Idle};
 static std::atomic<u32> screenshot_game_only_count{0};
 static std::atomic<u32> screenshot_with_overlays_count{0};
 
