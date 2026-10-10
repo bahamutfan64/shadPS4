@@ -278,6 +278,15 @@ public:
     Id local_invocation_id{};
     Id local_invocation_index{};
     Id invocation_id{};
+
+    /// A geometry shader that declares more output vertices than the host's component budget
+    /// allows is run as several invocations, each emitting one window of the vertex stream.
+    /// gs_split_invocations is 0 when the shader is not split.
+    u32 gs_split_window{};
+    u32 gs_split_invocations{};
+    u32 gs_split_max_vertices{};
+    Id gs_vertex_count{};
+    Id gs_strip_index{};
     Id subgroup_local_invocation_id{};
     Id subgroup_lt_mask{};
     Id image_u32{};
@@ -404,6 +413,7 @@ private:
     void DefineImagesAndSamplers();
     void DefineSharedMemory();
     void DefineFunctions();
+    void DefineGeometrySplit();
 
     SpirvAttribute GetAttributeInfo(AmdGpu::NumberFormat fmt, Id id, u32 num_components,
                                     bool output, bool loaded = false, bool array = false);

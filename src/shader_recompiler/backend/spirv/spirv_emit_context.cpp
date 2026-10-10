@@ -3,6 +3,7 @@
 
 #include "common/assert.h"
 #include "common/div_ceil.h"
+#include "common/logging/log.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/ir/attribute.h"
@@ -13,6 +14,7 @@
 #include <fmt/format.h>
 #include <spirv/unified1/spirv.hpp11>
 
+#include <algorithm>
 #include <numbers>
 #include <string_view>
 
@@ -86,6 +88,53 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineBuffers();
     DefineImagesAndSamplers();
     DefineFunctions();
+    DefineGeometrySplit();
+}
+
+void EmitContext::DefineGeometrySplit() {
+    if (sw_stage != SwStage::Geometry) {
+        return;
+    }
+    // Vulkan only guarantees 1024 total output components per geometry shader invocation
+    // (maxGeometryTotalOutputComponents); NVIDIA rejects a program that declares more.
+    static constexpr u32 MaxTotalOutputComponents = 1024;
+    u32 components = 4; // gl_Position
+    for (const auto& param : output_params) {
+        if (Sirit::ValidId(param.id)) {
+            components += 4;
+        }
+    }
+    if (Sirit::ValidId(clip_distances)) {
+        components += MaxEmulatedClipDistances;
+    }
+    const auto& gs = runtime_info.hw.gs;
+    gs_split_max_vertices = std::max(1u, MaxTotalOutputComponents / components);
+    if (gs.output_vertices <= gs_split_max_vertices) {
+        return;
+    }
+    // Only triangle strips from a single guest invocation are split; anything else is clamped.
+    if (gs.num_invocations > 1 || gs_split_max_vertices < 8 ||
+        gs.out_primitive[0] != AmdGpu::GsOutputPrimitiveType::TriangleStrip) {
+        LOG_WARNING(Render_Recompiler,
+                    "Clamping geometry shader {:#x} output vertices from {} to {} ({} components)",
+                    info.pgm_hash, gs.output_vertices, gs_split_max_vertices, components);
+        return;
+    }
+    // Each invocation may emit up to three vertices before its window to keep the strip joined.
+    gs_split_window = (gs_split_max_vertices - 3) & ~1u;
+    gs_split_invocations = (gs.output_vertices + gs_split_window - 1) / gs_split_window;
+    LOG_WARNING(Render_Recompiler,
+                "Splitting geometry shader {:#x}: {} output vertices over {} invocations of {} "
+                "({} components)",
+                info.pgm_hash, gs.output_vertices, gs_split_invocations, gs_split_window,
+                components);
+    invocation_id = DefineVariable(U32[1], spv::BuiltIn::InvocationId, spv::StorageClass::Input);
+    gs_vertex_count =
+        DefineVariable(U32[1], std::nullopt, spv::StorageClass::Private, u32_zero_value);
+    gs_strip_index =
+        DefineVariable(U32[1], std::nullopt, spv::StorageClass::Private, u32_zero_value);
+    Name(gs_vertex_count, "gs_vertex_count");
+    Name(gs_strip_index, "gs_strip_index");
 }
 
 EmitContext::~EmitContext() = default;

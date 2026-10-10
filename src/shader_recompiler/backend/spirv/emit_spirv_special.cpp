@@ -92,11 +92,53 @@ void EmitDiscardCond(EmitContext& ctx, Id condition) {
 }
 
 void EmitEmitVertex(EmitContext& ctx) {
+    if (ctx.gs_split_invocations == 0) {
+        ctx.OpEmitVertex();
+        return;
+    }
+    // This invocation owns vertices [lo, hi) of the stream. It also emits the two vertices
+    // before lo so its first triangle joins the previous window, and a third one when that is
+    // needed to start on an even strip index (which keeps the winding). The previous invocation
+    // then drops its last vertex so the shared triangle is not drawn twice.
+    const Id u32{ctx.U32[1]};
+    const Id u1{ctx.U1[1]};
+    const Id count{ctx.OpLoad(u32, ctx.gs_vertex_count)};
+    const Id strip{ctx.OpLoad(u32, ctx.gs_strip_index)};
+    const Id invocation{ctx.OpLoad(u32, ctx.invocation_id)};
+    const Id lo{ctx.OpIMul(u32, invocation, ctx.ConstU32(ctx.gs_split_window))};
+    const Id hi{ctx.OpIAdd(u32, lo, ctx.ConstU32(ctx.gs_split_window))};
+    const Id strip_even{
+        ctx.OpIEqual(u1, ctx.OpBitwiseAnd(u32, strip, ctx.ConstU32(1u)), ctx.ConstU32(0u))};
+    const Id joins{ctx.OpUGreaterThanEqual(u1, ctx.OpIAdd(u32, count, ctx.ConstU32(2u)), lo)};
+    const Id fixes_parity{ctx.OpLogicalAnd(
+        u1, ctx.OpIEqual(u1, ctx.OpIAdd(u32, count, ctx.ConstU32(3u)), lo), strip_even)};
+    const Id started{ctx.OpLogicalOr(u1, joins, fixes_parity)};
+    const Id is_last_of_window{ctx.OpIEqual(u1, ctx.OpIAdd(u32, count, ctx.ConstU32(1u)), hi)};
+    const Id has_next{ctx.OpULessThan(u1, ctx.OpIAdd(u32, invocation, ctx.ConstU32(1u)),
+                                      ctx.ConstU32(ctx.gs_split_invocations))};
+    const Id next_takes_it{ctx.OpLogicalAnd(
+        u1, ctx.OpLogicalAnd(u1, is_last_of_window, has_next),
+        ctx.OpLogicalAnd(u1, strip_even, ctx.OpUGreaterThanEqual(u1, strip, ctx.ConstU32(2u))))};
+    const Id in_window{ctx.OpLogicalAnd(u1, ctx.OpULessThan(u1, count, hi),
+                                        ctx.OpLogicalNot(u1, next_takes_it))};
+    const Id emit{ctx.OpLogicalAnd(u1, started, in_window)};
+    ctx.OpStore(ctx.gs_vertex_count, ctx.OpIAdd(u32, count, ctx.ConstU32(1u)));
+    ctx.OpStore(ctx.gs_strip_index, ctx.OpIAdd(u32, strip, ctx.ConstU32(1u)));
+    const Id emit_label{ctx.OpLabel()};
+    const Id merge_label{ctx.OpLabel()};
+    ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    ctx.OpBranchConditional(emit, emit_label, merge_label);
+    ctx.AddLabel(emit_label);
     ctx.OpEmitVertex();
+    ctx.OpBranch(merge_label);
+    ctx.AddLabel(merge_label);
 }
 
 void EmitEmitPrimitive(EmitContext& ctx) {
     ctx.OpEndPrimitive();
+    if (ctx.gs_split_invocations != 0) {
+        ctx.OpStore(ctx.gs_strip_index, ctx.ConstU32(0u));
+    }
 }
 
 void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {

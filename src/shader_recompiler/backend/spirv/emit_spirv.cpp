@@ -23,30 +23,6 @@
 namespace Shader::Backend::SPIRV {
 namespace {
 
-/// Vulkan only guarantees 1024 total output components per geometry shader invocation
-/// (maxGeometryTotalOutputComponents). A guest shader that declares more vertices than fit in
-/// that budget makes the host GPU reject the program and the device is lost, so clamp the count.
-static u32 ClampGsOutputVertices(const EmitContext& ctx, u32 output_vertices) {
-    static constexpr u32 MaxTotalOutputComponents = 1024;
-    u32 components = 4; // gl_Position
-    for (const auto& param : ctx.output_params) {
-        if (Sirit::ValidId(param.id)) {
-            components += 4;
-        }
-    }
-    if (Sirit::ValidId(ctx.clip_distances)) {
-        components += MaxEmulatedClipDistances;
-    }
-    const u32 max_vertices = std::max(1u, MaxTotalOutputComponents / components);
-    if (output_vertices > max_vertices) {
-        LOG_WARNING(Render_Recompiler,
-                    "Clamping geometry shader {:#x} output vertices from {} to {} ({} components)",
-                    ctx.info.pgm_hash, output_vertices, max_vertices, components);
-        return max_vertices;
-    }
-    return output_vertices;
-}
-
 static constexpr spv::ExecutionMode GetInputPrimitiveType(AmdGpu::PrimitiveType type) {
     switch (type) {
     case AmdGpu::PrimitiveType::PointList:
@@ -469,10 +445,13 @@ void DefineEntryPoint(const Info& info, const RuntimeInfo& runtime_info, EmitCon
         execution_model = spv::ExecutionModel::Geometry;
         ctx.AddExecutionMode(main, GetInputPrimitiveType(ctx.runtime_info.hw.gs.in_primitive));
         ctx.AddExecutionMode(main, GetOutputPrimitiveType(ctx.runtime_info.hw.gs.out_primitive[0]));
-        ctx.AddExecutionMode(main, spv::ExecutionMode::OutputVertices,
-                             ClampGsOutputVertices(ctx, ctx.runtime_info.hw.gs.output_vertices));
+        ctx.AddExecutionMode(
+            main, spv::ExecutionMode::OutputVertices,
+            std::min(ctx.runtime_info.hw.gs.output_vertices, ctx.gs_split_max_vertices));
         ctx.AddExecutionMode(main, spv::ExecutionMode::Invocations,
-                             ctx.runtime_info.hw.gs.num_invocations);
+                             ctx.gs_split_invocations != 0
+                                 ? ctx.gs_split_invocations
+                                 : ctx.runtime_info.hw.gs.num_invocations);
         break;
     default:
         UNREACHABLE_MSG("Stage {}", u32(info.hw_stage));
