@@ -140,11 +140,12 @@ void Liverpool::Process(std::stop_token stoken) {
         }
 
         if (submit_done) {
-            VideoCore::EndCapture();
             if (rasterizer) {
                 rasterizer->OnSubmit();
                 rasterizer->Flush();
             }
+            // After the flush, so the frame's own command buffer is part of the capture.
+            VideoCore::EndCapture();
             submit_done = false;
         }
 
