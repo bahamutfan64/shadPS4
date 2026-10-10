@@ -139,14 +139,13 @@ void RingAccessElimination(const IR::Program& program, const RuntimeInfo& runtim
                 const auto vc_read_ofs = (((offset / comp_ofs) * comp_ofs) % output_size) * 16u;
                 const auto& it = info.gs_copy_data.attr_map.find(vc_read_ofs);
                 ASSERT(it != info.gs_copy_data.attr_map.cend());
+                const auto& [attr, comp] = it->second;
 
                 inst.Invalidate();
-                for (const auto& [attr, comp] : it->second) {
-                    if (IsPosition(attr)) {
-                        ExportPosition(ir, gs_info, false, attr, comp, data);
-                    } else {
-                        ir.SetAttribute(attr, data, comp);
-                    }
+                if (IsPosition(attr)) {
+                    ExportPosition(ir, gs_info, false, attr, comp, data);
+                } else {
+                    ir.SetAttribute(attr, data, comp);
                 }
                 break;
             }
