@@ -32,6 +32,13 @@ inline bool IsPlausibleImageSharp(const AmdGpu::Image& image) noexcept {
     if (image.Address() >= 0x10000000000ULL) {
         return false;
     }
+    // Swizzle selectors 2 and 3 do not exist.
+    for (const u64 sel : {u64(image.dst_sel_x), u64(image.dst_sel_y), u64(image.dst_sel_z),
+                          u64(image.dst_sel_w)}) {
+        if (!magic_enum::enum_contains(static_cast<AmdGpu::CompSwizzle>(sel))) {
+            return false;
+        }
+    }
     const u32 width = image.width + 1;
     const u32 height = image.height + 1;
     if (image.Pitch() < width) {
