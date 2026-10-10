@@ -63,6 +63,9 @@ std::span<const SurfaceFormatInfo> SurfaceFormats();
 
 vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format);
 
+/// Returns true if the format pair has a Vulkan equivalent, without asserting.
+bool IsSurfaceFormatKnown(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format);
+
 struct DepthFormatInfo {
     AmdGpu::DepthBuffer::ZFormat z_format;
     AmdGpu::DepthBuffer::StencilFormat stencil_format;

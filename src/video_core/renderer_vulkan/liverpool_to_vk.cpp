@@ -789,6 +789,11 @@ vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat nu
     return result;
 }
 
+bool IsSurfaceFormatKnown(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format) {
+    return surface_format_table[GetSurfaceFormatTableIndex(data_format, num_format)] !=
+           vk::Format::eUndefined;
+}
+
 static constexpr DepthFormatInfo CreateDepthFormatInfo(
     const DepthBuffer::ZFormat z_format, const DepthBuffer::StencilFormat stencil_format,
     const vk::Format vk_format) {
