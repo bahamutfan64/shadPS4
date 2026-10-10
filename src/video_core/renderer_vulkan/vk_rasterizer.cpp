@@ -926,6 +926,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 return "implausibly large";
             }
             const VideoCore::ImageInfo info{tsharp, image_desc};
+            // Junk slots often decode as a tiny face with hundreds of layers or slices; tile
+            // padding then makes each one cost tens to hundreds of megabytes of guest memory.
+            if (u64(width) * height < 256 * 256 && info.guest_size >= 16_MB) {
+                return "tiny face with a huge footprint";
+            }
             if (!IsMapped(info.guest_address, info.guest_size)) {
                 return "memory range not mapped";
             }
