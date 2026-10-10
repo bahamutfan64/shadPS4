@@ -1297,6 +1297,11 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
             return;
         }
     }
+    if (!is_gds) {
+        // The fill lands in the buffer cache; an image cached over the same memory must be
+        // refreshed from it before it is sampled again (as CopyBuffer already does).
+        texture_cache.InvalidateMemoryFromGPU(address, num_bytes);
+    }
     const auto [buffer, offset] = [&] -> std::pair<const VideoCore::Buffer*, u64> {
         if (is_gds) {
             return {buffer_cache.GetGdsBuffer(), address};
