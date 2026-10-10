@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <bit>
+
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -833,33 +836,67 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
         // Shaders can declare textures they only sample behind a feature flag; the unused
         // slots then hold arbitrary data that must not reach the texture cache.
-        const auto is_plausible_tsharp = [&] {
-            if (!memory->IsValidGpuMapping(tsharp.Address(), 0) ||
-                !magic_enum::enum_contains(data_fmt) || !magic_enum::enum_contains(num_fmt) ||
-                !LiverpoolToVK::IsSurfaceFormatKnown(data_fmt, num_fmt)) {
-                return false;
+        // Returns the reason the descriptor cannot be a real texture, or nullptr if it can.
+        const auto tsharp_reject_reason = [&]() -> const char* {
+            if (!memory->IsValidGpuMapping(tsharp.Address(), 0)) {
+                return "address above 40 bits";
             }
-            // The first byte must lie in memory the guest actually mapped.
-            if (!IsMapped(tsharp.Address(), 1)) {
-                return false;
+            if (!magic_enum::enum_contains(data_fmt) || !magic_enum::enum_contains(num_fmt)) {
+                return "unknown format value";
+            }
+            if (!LiverpoolToVK::IsSurfaceFormatKnown(data_fmt, num_fmt)) {
+                return "format has no Vulkan equivalent";
             }
             const auto tile_mode = tsharp.GetTileMode();
             if (!magic_enum::enum_contains(tile_mode)) {
-                return false;
+                return "unknown tile mode";
             }
             const auto array_mode = AmdGpu::GetArrayMode(tile_mode);
             if (array_mode == AmdGpu::ArrayMode::ArrayLinearGeneral) {
-                return false;
+                return "linear general tiling";
             }
             // The texture cache cannot size macro tiled block compressed images (it asserts).
-            return !(AmdGpu::IsMacroTiled(array_mode) && AmdGpu::IsBlockCoded(data_fmt));
+            if (AmdGpu::IsMacroTiled(array_mode) && AmdGpu::IsBlockCoded(data_fmt)) {
+                return "macro tiled block format";
+            }
+            const u32 width = tsharp.width + 1;
+            const u32 height = tsharp.height + 1;
+            const u32 depth = tsharp.depth + 1;
+            if (tsharp.Pitch() < width) {
+                return "pitch smaller than width";
+            }
+            if (tsharp.base_level > tsharp.last_level || tsharp.base_array > tsharp.last_array) {
+                return "inverted level or layer range";
+            }
+            const auto type = static_cast<AmdGpu::ImageType>(tsharp.type);
+            const bool is_msaa = type == AmdGpu::ImageType::Color2DMsaa ||
+                                 type == AmdGpu::ImageType::Color2DMsaaArray;
+            const bool is_volume = type == AmdGpu::ImageType::Color3D;
+            if (is_msaa) {
+                if (tsharp.last_level > 3) {
+                    return "more than 8 samples";
+                }
+            } else if (const u32 max_dim = std::max({width, height, is_volume ? depth : 1u});
+                       tsharp.last_level >= static_cast<u32>(std::bit_width(max_dim))) {
+                return "more mips than the size allows";
+            }
+            const u64 layers = tsharp.NumLayers();
+            const u64 rough_size = u64(tsharp.Pitch()) * height * (is_volume ? depth : layers);
+            if (layers > 2048 || rough_size > 256_MB) {
+                return "implausibly large";
+            }
+            const VideoCore::ImageInfo info{tsharp, image_desc};
+            if (!IsMapped(info.guest_address, info.guest_size)) {
+                return "memory range not mapped";
+            }
+            return nullptr;
         };
-        if (!is_plausible_tsharp()) {
+        if (const char* reason = tsharp_reject_reason()) {
             LOG_WARNING(Render_Vulkan,
-                        "Rejecting invalid T# address={:#x}, pitch={}, width={}, "
+                        "Rejecting invalid T# ({}) address={:#x}, pitch={}, width={}, "
                         "data_format={}, num_format={}",
-                        tsharp.Address(), tsharp.pitch, tsharp.width, static_cast<u32>(data_fmt),
-                        static_cast<u32>(num_fmt));
+                        reason, tsharp.Address(), tsharp.pitch, tsharp.width,
+                        static_cast<u32>(data_fmt), static_cast<u32>(num_fmt));
             image_bindings.emplace_back(std::piecewise_construct, std::tuple{}, std::tuple{});
             image_descriptor_array_sizes.push_back(1);
             continue;
