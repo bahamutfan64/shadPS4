@@ -405,6 +405,25 @@ bool PipelineCache::RefreshGraphicsKey() {
                              : AmdGpu::DepthBuffer::StencilFormat::Invalid;
     key.depth_clamp_enable = !regs.depth_render_override.disable_viewport_clamp;
     key.depth_clip_enable = regs.clipper_control.ZclipEnable();
+    {
+        // DIAGNOSTIC: report each distinct near/far Z clip combination the game uses.
+        static u32 seen_combos = 0;
+        const u32 combo = (regs.clipper_control.zclip_near_disable ? 1u : 0u) |
+                          (regs.clipper_control.zclip_far_disable ? 2u : 0u) |
+                          (regs.depth_render_override.disable_viewport_clamp ? 4u : 0u) |
+                          (regs.clipper_control.clip_disable ? 8u : 0u);
+        if (!(seen_combos & (1u << combo))) {
+            seen_combos |= 1u << combo;
+            LOG_INFO(Render_Vulkan,
+                     "Z clip combo: near_disable={} far_disable={} viewport_clamp_disable={} "
+                     "clip_disable={} clip_space={} -> depth_clip_enable={}",
+                     u32(regs.clipper_control.zclip_near_disable),
+                     u32(regs.clipper_control.zclip_far_disable),
+                     u32(regs.depth_render_override.disable_viewport_clamp),
+                     u32(regs.clipper_control.clip_disable), u32(regs.clipper_control.clip_space),
+                     key.depth_clip_enable != 0);
+        }
+    }
     key.clip_space = regs.clipper_control.clip_space;
     key.provoking_vtx_last = regs.polygon_control.provoking_vtx_last;
     key.prim_type = regs.primitive_type;
