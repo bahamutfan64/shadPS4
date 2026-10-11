@@ -400,6 +400,7 @@ void Rasterizer::Finish() {
 }
 
 void Rasterizer::OnSubmit() {
+    RecheckZeroCountDraws();
     buffer_cache.TickFrame();
     texture_cache.ProcessDownloadImages();
     texture_cache.RunGarbageCollector();
@@ -1357,18 +1358,62 @@ bool Rasterizer::IsRegionGpuModified(VAddr addr, u64 size) {
     return buffer_cache.IsRegionGpuModified(addr, size);
 }
 
+namespace {
+struct ZeroCountEntry {
+    VAddr addr;
+    u32 submit;
+};
+std::vector<ZeroCountEntry> zero_count_pending;
+u32 zero_count_submit = 0;
+u32 zero_count_total = 0;
+u32 zero_count_gpu_modified = 0;
+u32 zero_count_rechecked = 0;
+u32 zero_count_patched_later = 0;
+} // namespace
+
 void Rasterizer::ReportZeroCountDraw(const char* packet, VAddr count_addr) {
-    // Diagnostic: a game that issues many zero-count direct draws may be patching the counts on
-    // the GPU after this parser has read them. Say whether the count field is GPU-modified memory.
-    static u32 total = 0;
-    static u32 gpu_modified = 0;
+    // Diagnostic: a game that issues many zero-count direct draws may be patching the counts
+    // after this parser has read them, on the GPU or from the CPU. Record whether the field is
+    // GPU-modified memory now, and re-read it a few submits later (RecheckZeroCountDraws).
     const bool is_gpu = IsRegionGpuModified(count_addr, sizeof(u32));
-    ++total;
-    gpu_modified += is_gpu ? 1 : 0;
-    if (total % 500 == 1) {
+    ++zero_count_total;
+    zero_count_gpu_modified += is_gpu ? 1 : 0;
+    if (zero_count_pending.size() < 20000) {
+        zero_count_pending.push_back({count_addr, zero_count_submit});
+    }
+    if (zero_count_total % 500 == 1) {
         LOG_WARNING(Render_Vulkan,
                     "Zero-count {} #{} at {:#x}: count field gpu-modified={} (gpu-modified so far {})",
-                    packet, total, count_addr, is_gpu, gpu_modified);
+                    packet, zero_count_total, count_addr, is_gpu, zero_count_gpu_modified);
+    }
+}
+
+void Rasterizer::RecheckZeroCountDraws() {
+    ++zero_count_submit;
+    u32 found = 0;
+    u32 example = 0;
+    VAddr example_addr = 0;
+    std::erase_if(zero_count_pending, [&](const ZeroCountEntry& e) {
+        if (zero_count_submit - e.submit < 3) {
+            return false;
+        }
+        const u32 now = *reinterpret_cast<const volatile u32*>(e.addr);
+        ++zero_count_rechecked;
+        if (now != 0) {
+            ++zero_count_patched_later;
+            if (found++ == 0) {
+                example = now;
+                example_addr = e.addr;
+            }
+        }
+        return true;
+    });
+    if (zero_count_submit % 600 == 0 && zero_count_rechecked != 0) {
+        LOG_WARNING(Render_Vulkan,
+                    "Zero-count recheck after {} submits: {} re-read, {} became non-zero later "
+                    "(latest example {:#x} = {})",
+                    zero_count_submit, zero_count_rechecked, zero_count_patched_later, example_addr,
+                    example);
     }
 }
 
