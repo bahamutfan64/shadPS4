@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <thread>
 #include <SDL3/SDL.h>
 #include <common/logging/log.h>
 #include <core/emulator_settings.h>
@@ -99,7 +102,20 @@ public:
             const int framesRead = bytesRead / (port.sample_size * port.channels_num);
             return framesRead;
         } else if (internal_buffer) {
-            // Return silence from null device buffer
+            // Return silence from null device buffer, at the rate a real microphone delivers
+            // it. On a console this call blocks until a block of samples has been captured
+            // (256 samples at 16 kHz is 16 ms). Returning at once makes a game's capture
+            // thread spin on a full core, processing silence thousands of times a second.
+            using namespace std::chrono;
+            const auto period =
+                nanoseconds(1'000'000'000LL * port.samples_num / std::max<s64>(port.freq, 1));
+            const auto now = steady_clock::now();
+            if (next_null_read < now - 4 * period) {
+                // First call, or the caller stopped reading for a while: do not burst.
+                next_null_read = now;
+            }
+            next_null_read += period;
+            std::this_thread::sleep_until(next_null_read);
             std::memcpy(out_buffer, internal_buffer, bytesToRead);
             return port.samples_num;
         } else {
@@ -126,6 +142,7 @@ private:
     SDL_AudioStream* stream = nullptr;
     void* internal_buffer = nullptr;
     bool nullDevice = false;
+    std::chrono::steady_clock::time_point next_null_read{};
 };
 
 std::unique_ptr<PortInBackend> SDLAudioIn::Open(PortIn& port) {

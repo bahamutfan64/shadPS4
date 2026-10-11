@@ -60,6 +60,21 @@ inline void OnGameFrame() {
     const auto rs = take(make_resident);
     const u32 faults = page_faults.exchange(0);
     ++frame_index;
+    {
+        // Once a second: how many game frames arrived.
+        static std::chrono::steady_clock::time_point second_start{};
+        static u32 frames_this_second = 0;
+        ++frames_this_second;
+        if (second_start.time_since_epoch().count() == 0) {
+            second_start = now;
+        } else if (now - second_start >= std::chrono::seconds(1)) {
+            const f64 secs = std::chrono::duration<f64>(now - second_start).count();
+            LOG_INFO(Render_Vulkan, "Frame rate: {:.1f} fps (frame #{})", frames_this_second / secs,
+                     frame_index);
+            second_start = now;
+            frames_this_second = 0;
+        }
+    }
     if (last.time_since_epoch().count() != 0) {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count();
         if (ms >= 50) {
