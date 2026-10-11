@@ -1241,6 +1241,10 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
 }
 
 void Rasterizer::Resolve() {
+    // A fast clear of MRT0 that no draw has materialised yet must be applied before resolving,
+    // or the resolve copies the surface's previous contents (Tearaway Unfolded clears its UI
+    // layer this way and resolves it without drawing when the layer is empty).
+    EliminateFastClear();
     const auto& mrt0_hint = liverpool->last_cb_extent[0];
     const auto& mrt1_hint = liverpool->last_cb_extent[1];
     VideoCore::TextureCache::ImageDesc mrt0_desc{liverpool->regs.color_buffers[0], mrt0_hint};
