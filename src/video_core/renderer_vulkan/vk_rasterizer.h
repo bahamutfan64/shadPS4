@@ -75,7 +75,6 @@ public:
     bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
     bool IsRegionGpuModified(VAddr addr, u64 size);
     void ReportZeroCountDraw(const char* packet, VAddr count_addr);
-    void RecheckZeroCountDraws();
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
