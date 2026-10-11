@@ -176,11 +176,10 @@ struct Info : InfoPersistent {
         if (srt_info.walker_func) {
             srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
         }
-        // Game workaround (Tearaway Unfolded, CUSA01607): the paper-petal particle vertex shader
-        // projects into the shadow map with 12 dwords of its constant struct (+0x80..+0xAC) that
-        // the game never writes. On the console the leftovers there are benign; here they hold
-        // stale pointers and canaries, the shadow compare fails and petals near the camera are
-        // drawn black. A zero block makes the compare pass, as fresh memory would.
+        // EXPERIMENT (Tearaway Unfolded petals): this particle vertex shader projects into the
+        // shadow map with 12 dwords of its constant struct (+0x80..+0xAC) that the game never
+        // writes; the leftovers there make near petals black. Zero them to see whether a
+        // zero-filled block (as fresh PS4 memory would be) restores the lighting.
         if (pgm_hash == 0x8f34ffa4ULL && flattened_ud_buf.size() >= 0x2c) {
             std::fill(flattened_ud_buf.begin() + 0x20, flattened_ud_buf.begin() + 0x2c, 0u);
         }
