@@ -169,6 +169,19 @@ s32 PS4_SYSV_ABI open(const char* raw_path, s32 flags, u16 mode) {
                 LOG_ERROR(Kernel_Fs, "Creating {} failed, path is read-only", raw_path);
                 return -1;
             }
+            // A file cannot be created in a directory that does not exist: the kernel reports
+            // ENOENT, and games that create their save files without creating the folders
+            // first rely on that errno to make the folders and retry (Tearaway Unfolded).
+            // Without it the create fails in the backend and open() reports EIO.
+            std::error_code ec;
+            const auto host_parent = file->m_host_name.parent_path();
+            if (!host_parent.empty() && !std::filesystem::is_directory(host_parent, ec)) {
+                h->DeleteHandle(handle);
+                *__Error() = POSIX_ENOENT;
+                LOG_ERROR(Kernel_Fs, "Creating {} failed, parent directory does not exist",
+                          raw_path);
+                return -1;
+            }
             // Create a file if it doesn't exist
             Common::FS::IOFile out(file->m_host_name, Common::FS::FileAccessMode::Create);
         }
