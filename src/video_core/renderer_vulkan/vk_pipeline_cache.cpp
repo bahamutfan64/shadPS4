@@ -162,6 +162,14 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
             !instance.IsDepthClipControlSupported() &&
             regs.clipper_control.clip_space == AmdGpu::ClipSpace::MinusWToW;
         info.hw.vs.clip_disable = regs.IsClipDisabled();
+        // Near clipping without far clipping has no host depth-clip equivalent (both planes are
+        // toggled together), so the pipeline runs unclipped and the near plane is applied as a
+        // clip distance instead.
+        if (!regs.IsClipDisabled() && !regs.clipper_control.zclip_near_disable &&
+            regs.clipper_control.zclip_far_disable) {
+            info.hw.vs.near_clip_mode =
+                regs.clipper_control.clip_space == AmdGpu::ClipSpace::ZeroToW ? 1 : 2;
+        }
         break;
     }
     case HwStage::Fragment: {

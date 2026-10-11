@@ -28,8 +28,9 @@ void LowerUserClipPlanes(IR::Program& program, const RuntimeInfo& runtime_info) 
         .buffer_type = BufferType::ClipPlanes,
     });
 
-    const u32 enabled_mask = runtime_info.hw.vs.user_clip_plane_mask;
-    if (enabled_mask == 0) {
+    u32 enabled_mask = runtime_info.hw.vs.user_clip_plane_mask;
+    const u32 near_clip_mode = runtime_info.hw.vs.near_clip_mode;
+    if (enabled_mask == 0 && near_clip_mode == 0) {
         return;
     }
 
@@ -37,16 +38,19 @@ void LowerUserClipPlanes(IR::Program& program, const RuntimeInfo& runtime_info) 
     // the eight ClipDistance slots here, and the guest's exports own their indices. Lowering is
     // skipped for such shaders, which restores the previous behavior of clipping by the exported
     // distances alone.
+    bool exports_distances = false;
     for (u32 i = 0; i < runtime_info.hw.vs.num_outputs; ++i) {
         for (const auto output : runtime_info.hw.vs.outputs[i]) {
             if (output >= Output::ClipDist0 && output <= Output::ClipDist7) {
-                LOG_WARNING(Render_Vulkan,
-                            "Skipping user clip plane lowering: shader {:#x} exports its own clip "
-                            "distances",
-                            info.pgm_hash);
-                return;
+                exports_distances = true;
             }
         }
+    }
+    if (exports_distances) {
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping clip plane lowering: shader {:#x} exports its own clip distances",
+                    info.pgm_hash);
+        return;
     }
 
     // Clip distances are computed from the final exported position.
@@ -82,6 +86,15 @@ void LowerUserClipPlanes(IR::Program& program, const RuntimeInfo& runtime_info) 
                                         IR::F32{ir.CompositeExtract(equation, comp)}, distance)};
         }
         ir.SetAttribute(IR::Attribute::ClipDistance, distance, plane);
+    }
+
+    // Near plane of the guest clip volume, in the slot after the user planes.
+    if (near_clip_mode != 0) {
+        IR::F32 distance{position[2]};
+        if (near_clip_mode == 2) {
+            distance = IR::F32{ir.FPAdd(distance, IR::F32{position[3]})};
+        }
+        ir.SetAttribute(IR::Attribute::ClipDistance, distance, NumUserClipPlanes);
     }
 }
 

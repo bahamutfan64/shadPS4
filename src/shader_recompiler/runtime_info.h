@@ -96,6 +96,9 @@ struct HwVertexRuntimeInfo {
     bool emulate_depth_negative_one_to_one{};
     bool clip_disable{};
     u32 user_clip_plane_mask{};
+    /// The guest clips against the near plane but not the far plane, which the host cannot
+    /// express with depth clipping alone. 0 = off, 1 = clip z >= 0, 2 = clip z >= -w.
+    u32 near_clip_mode{};
 
     bool operator==(const HwVertexRuntimeInfo& other) const noexcept = default;
 };
