@@ -87,6 +87,16 @@ static u32 MapOutputs(std::span<Shader::OutputMap, 3> outputs, const AmdGpu::VsO
     return num_outputs;
 }
 
+// True when the guest clips against the near plane only and the plain vertex stage applies it as
+// a clip distance. The vertex and fragment stages must agree on this, because on hosts that
+// emulate clip distances it shifts the interface between them.
+static bool LowersNearClip(const AmdGpu::Regs& regs) {
+    return !regs.IsClipDisabled() && !regs.clipper_control.zclip_near_disable &&
+           regs.clipper_control.zclip_far_disable &&
+           !regs.stage_enable.IsStageEnabled(static_cast<u32>(HwStage::Geometry)) &&
+           !regs.stage_enable.IsStageEnabled(static_cast<u32>(HwStage::Local));
+}
+
 const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStage l_stage) {
     auto& info = runtime_infos[u32(l_stage)];
     const auto& regs = liverpool->regs;
@@ -165,8 +175,8 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
         // Near clipping without far clipping has no host depth-clip equivalent (both planes are
         // toggled together), so the pipeline runs unclipped and the near plane is applied as a
         // clip distance instead.
-        if (!regs.IsClipDisabled() && !regs.clipper_control.zclip_near_disable &&
-            regs.clipper_control.zclip_far_disable) {
+        info.hw.vs.near_clip_mode = 0;
+        if (LowersNearClip(regs)) {
             info.hw.vs.near_clip_mode =
                 regs.clipper_control.clip_space == AmdGpu::ClipSpace::ZeroToW ? 1 : 2;
         }
@@ -224,7 +234,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
         info.hw.fs.clip_distance_emulation =
             ((regs.vs_output_control.clip_distance_enable &&
               !regs.stage_enable.IsStageEnabled(static_cast<u32>(HwStage::Local))) ||
-             lowers_user_clip_planes) &&
+             lowers_user_clip_planes || LowersNearClip(regs)) &&
             profile.needs_clip_distance_emulation;
         break;
     }

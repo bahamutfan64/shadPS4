@@ -88,13 +88,33 @@ void LowerUserClipPlanes(IR::Program& program, const RuntimeInfo& runtime_info) 
         ir.SetAttribute(IR::Attribute::ClipDistance, distance, plane);
     }
 
-    // Near plane of the guest clip volume, in the slot after the user planes.
+    // Near plane of the guest clip volume. Where clip distances are emulated in the fragment
+    // stage only the first MaxEmulatedClipDistances slots exist, so it takes the highest of
+    // those that no user plane occupies; the remaining free ones are written as zero (never
+    // clipped) so the fragment stage does not test undefined values.
     if (near_clip_mode != 0) {
+        s32 near_slot = -1;
+        for (s32 slot = MaxEmulatedClipDistances - 1; slot >= 0; --slot) {
+            if (((enabled_mask >> slot) & 1) == 0) {
+                near_slot = slot;
+                break;
+            }
+        }
+        if (near_slot < 0) {
+            LOG_WARNING(Render_Vulkan, "No clip distance slot left for the near plane in {:#x}",
+                        info.pgm_hash);
+            return;
+        }
         IR::F32 distance{position[2]};
         if (near_clip_mode == 2) {
             distance = IR::F32{ir.FPAdd(distance, IR::F32{position[3]})};
         }
-        ir.SetAttribute(IR::Attribute::ClipDistance, distance, NumUserClipPlanes);
+        ir.SetAttribute(IR::Attribute::ClipDistance, distance, static_cast<u32>(near_slot));
+        for (u32 slot = 0; slot < MaxEmulatedClipDistances; ++slot) {
+            if (static_cast<s32>(slot) != near_slot && ((enabled_mask >> slot) & 1) == 0) {
+                ir.SetAttribute(IR::Attribute::ClipDistance, ir.Imm32(0.0f), slot);
+            }
+        }
     }
 }
 
