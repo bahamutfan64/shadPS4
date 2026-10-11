@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/div_ceil.h"
+#include "common/frame_probe.h"
 #include "core/memory.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/fault_manager.h"
@@ -166,6 +167,7 @@ void FaultManager::ProcessFaultBuffer() {
         fault_ranges.Clear();
         const u64* fault_buf = std::bit_cast<const u64*>(mapped);
         const u32 fault_count = fault_buf[0];
+        Common::FrameProbe::page_faults += fault_count;
         for (u32 i = 1; i <= fault_count; ++i) {
             // A shader that reads guest memory through the page table gets zeros for a page
             // that is not resident yet, and the page only becomes resident for the next

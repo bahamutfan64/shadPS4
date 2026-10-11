@@ -5,6 +5,7 @@
 #include <xxhash.h>
 
 #include "common/assert.h"
+#include "common/frame_probe.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
 #include "common/hash.h"
@@ -744,6 +745,7 @@ void TextureCache::RefreshImage(Image& image) {
 
     RENDERER_TRACE;
     TRACE_HINT(fmt::format("{:x}:{:x}", image.info.guest_address, image.info.guest_size));
+    Common::FrameProbe::Scope probe{Common::FrameProbe::texture_refresh, image.info.guest_size};
 
     if (True(image.flags & ImageFlagBits::MaybeCpuDirty) &&
         False(image.flags & ImageFlagBits::CpuDirty)) {
