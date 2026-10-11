@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <bit>
 #include <cstring>
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -220,13 +222,32 @@ struct Image {
     }
 
     u32 Pitch() const {
-        return pitch + 1;
+        const u32 field = pitch + 1;
+        // A power-of-two padded texture has its row pitch implied by its width, and games can
+        // leave the field unwritten (Tearaway Unfolded describes one 1024x1024 texture with
+        // pitches from 1025 to 15361). Fall back to the padded width when the field cannot be a
+        // pitch for this width: narrower than the texture, far wider, or not tile aligned.
+        if (pow2pad) {
+            const u32 padded = std::bit_ceil(static_cast<u32>(width) + 1);
+            const bool plausible = field >= static_cast<u32>(width) + 1 &&
+                                   field <= std::max(2 * padded, 256u) && (field & 7) == 0;
+            if (!plausible) {
+                return std::max(padded, 8u);
+            }
+        }
+        return field;
     }
 
     [[nodiscard]] u32 NumLayers() const noexcept {
+        const auto image_type = GetType();
+        // Only array and cube types have more than one slice. For plain 1D and 2D textures the
+        // hardware ignores the depth field, which games may leave holding leftover bits.
+        if (image_type == ImageType::Color1D || image_type == ImageType::Color2D ||
+            image_type == ImageType::Color2DMsaa) {
+            return 1;
+        }
         // Depth is the number of layers for Array images.
         u32 slices = depth + 1;
-        const auto image_type = GetType();
         if (image_type == ImageType::Color3D) {
             // Depth is the actual texture depth for 3D images.
             slices = 1;
