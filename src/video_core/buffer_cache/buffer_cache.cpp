@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
 
 #include "common/alignment.h"
@@ -103,6 +104,7 @@ void BufferCache::TickFrame() {
 }
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
+    dma_dirty.store(true, std::memory_order_relaxed);
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
         ReadMemory(device_addr, size, true, assume_locks);
     });
@@ -215,7 +217,18 @@ bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {
 
 void BufferCache::SynchronizeDmaBuffers() {
     fault_process_pending = true;
+    static const bool skip_enabled = [] {
+        const char* v = std::getenv("SHADPS4_DMA_SYNC_SKIP");
+        return v != nullptr && v[0] == '1';
+    }();
+    // Experimental: nothing can need an upload if no write was recorded since the last pass.
+    if (skip_enabled && !dma_dirty.exchange(false, std::memory_order_relaxed)) {
+        ++Common::FrameProbe::sec_dma_skipped.count;
+        return;
+    }
+    Common::FrameProbe::Scope probe{Common::FrameProbe::sec_dma_sync};
     for (const auto& range : resident_ranges) {
+        ++Common::FrameProbe::sec_dma_sync.bytes;
         const u64 page = range.start >> (ARENA_PAGE_BITS - block_shift);
         const VAddr device_addr = range.start << block_shift;
         const u64 size = (range.end - range.start) << block_shift;
@@ -288,6 +301,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     if (bind_ranges.Empty()) {
         return;
     }
+    dma_dirty.store(true, std::memory_order_relaxed);
     Common::FrameProbe::Scope probe{Common::FrameProbe::make_resident,
                                     u64(resident_blocks) << block_shift};
 
@@ -348,6 +362,8 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         total_size_bytes += size;
     });
     if (!copies.empty()) {
+        ++Common::FrameProbe::sec_dma_upload.count;
+        Common::FrameProbe::sec_dma_upload.bytes += total_size_bytes;
         const auto staging = staging_pool.Request(total_size_bytes, MemoryType::HostUncached);
         for (auto& copy : copies) {
             memory->CopySparseMemory(copy.dstOffset, staging.mapped + copy.srcOffset, copy.size);

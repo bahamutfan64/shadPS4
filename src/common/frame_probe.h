@@ -23,6 +23,11 @@ inline Counter pipeline_compile;
 inline Counter texture_refresh;
 inline Counter make_resident;
 inline std::atomic<u32> page_faults{};
+// Accumulated over a second (not reset per frame).
+inline Counter sec_dma_sync;    // per-draw resync of DMA memory; bytes = resident ranges visited
+inline Counter sec_dma_skipped; // resyncs skipped by the experimental switch
+inline Counter sec_dma_upload;  // CPU-modified data re-uploaded; bytes = bytes
+inline Counter sec_write_fault; // guest write faults handled (any thread)
 
 class Scope {
 public:
@@ -71,6 +76,16 @@ inline void OnGameFrame() {
             const f64 secs = std::chrono::duration<f64>(now - second_start).count();
             LOG_INFO(Render_Vulkan, "Frame rate: {:.1f} fps (frame #{})", frames_this_second / secs,
                      frame_index);
+            const u64 ranges = sec_dma_sync.bytes.exchange(0);
+            const auto ds = take(sec_dma_sync);
+            const auto dk = take(sec_dma_skipped);
+            const auto du = take(sec_dma_upload);
+            const auto wf = take(sec_write_fault);
+            LOG_INFO(Render_Vulkan,
+                     "DMA per second: resyncs {} ({} ms, {} ranges each) skipped {} | re-uploads {} "
+                     "({} KB) | write faults {} ({} ms)",
+                     ds.count, ds.ms, ds.count ? ranges / ds.count : 0, dk.count, du.count,
+                     du.kb, wf.count, wf.ms);
             second_start = now;
             frames_this_second = 0;
         }

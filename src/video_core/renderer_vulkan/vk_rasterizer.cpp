@@ -1484,6 +1484,7 @@ void Rasterizer::MapMemory(VAddr addr, u64 size) {
         mapped_ranges += decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
     }
     ++mapped_generation;
+    buffer_cache.MarkDmaDirty();
 }
 
 void Rasterizer::RegisterMemory(VAddr addr, u64 size) {
@@ -1498,6 +1499,7 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
         mapped_ranges -= decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
     }
     ++mapped_generation;
+    buffer_cache.MarkDmaDirty();
 }
 
 void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {

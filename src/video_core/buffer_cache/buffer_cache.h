@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <deque>
 #include <boost/container/small_vector.hpp>
 
@@ -101,6 +102,9 @@ public:
 
     /// Synchronizes all buffers needed for DMA.
     void SynchronizeDmaBuffers();
+    void MarkDmaDirty() noexcept {
+        dma_dirty.store(true, std::memory_order_relaxed);
+    }
 
     /// Commits pending sparse buffer memory binds. Must be called before every scheduler submit.
     void SubmitPendingArenaBinds(Vulkan::SubmitInfo& info);
@@ -147,6 +151,9 @@ private:
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
     bool fault_process_pending{};
+    /// Set whenever guest memory may have changed under a resident range.
+    std::atomic<bool> dma_dirty{true};
+    bool dma_sync_skip{};
 
     std::array<const Buffer*, NUM_ARENA_PAGES> address_space{};
     std::deque<Buffer> arenas;
