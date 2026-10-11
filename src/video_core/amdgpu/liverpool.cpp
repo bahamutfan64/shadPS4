@@ -433,6 +433,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (!rasterizer) {
                     break;
                 }
+                if (draw_index->index_count == 0) {
+                    rasterizer->ReportZeroCountDraw(
+                        "DrawIndex2", reinterpret_cast<VAddr>(&draw_index->index_count));
+                }
                 const auto cmd_address = reinterpret_cast<const void*>(header);
                 rasterizer->ScopeMarker("gfx:{}:DrawIndex2", fmt::make_format_args(cmd_address),
                                         [&] { rasterizer->Draw(true); });
@@ -450,6 +454,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (!rasterizer) {
                     break;
                 }
+                if (draw_index_off->index_count == 0) {
+                    rasterizer->ReportZeroCountDraw(
+                        "DrawIndexOffset2", reinterpret_cast<VAddr>(&draw_index_off->index_count));
+                }
                 const auto cmd_address = reinterpret_cast<const void*>(header);
                 rasterizer->ScopeMarker(
                     "gfx:{}:DrawIndexOffset2", fmt::make_format_args(cmd_address),
@@ -465,6 +473,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 }
                 if (!rasterizer) {
                     break;
+                }
+                if (draw_index->index_count == 0) {
+                    rasterizer->ReportZeroCountDraw(
+                        "DrawIndexAuto", reinterpret_cast<VAddr>(&draw_index->index_count));
                 }
                 const auto cmd_address = reinterpret_cast<const void*>(header);
                 rasterizer->ScopeMarker("gfx:{}:DrawIndexAuto", fmt::make_format_args(cmd_address),
