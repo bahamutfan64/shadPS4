@@ -21,6 +21,14 @@ namespace Shader {
 /// hold arbitrary data. Such a slot must read as a null image everywhere (specialization,
 /// recompilation, pipeline layout and binding), otherwise those disagree on the resource layout.
 /// This only checks properties no real texture can violate.
+/// Stricter check installed by the renderer, which knows what guest memory is mapped and
+/// what the texture cache can handle. Returns false for a descriptor that cannot be a real
+/// texture. It has to run here rather than when binding: a junk slot that is only caught at
+/// bind time still reaches the specialization key with a random type and format, and every
+/// new value costs a shader and pipeline compile in the middle of a frame.
+using ImageSharpValidator = bool (*)(const AmdGpu::Image& image, bool is_depth);
+inline ImageSharpValidator image_sharp_validator = nullptr;
+
 inline bool IsPlausibleImageSharp(const AmdGpu::Image& image) noexcept {
     const auto data_fmt = static_cast<AmdGpu::DataFormat>(image.data_format);
     const auto num_fmt = static_cast<AmdGpu::NumberFormat>(image.num_format);
@@ -251,6 +259,9 @@ struct ImageResource {
             image.depth = (image.depth + 1) * 6 - 1;
         }
         if (!image.Valid() || (image.base_address != 0 && !IsPlausibleImageSharp(image))) {
+            image = AmdGpu::Image::Null(is_depth);
+        } else if (image.base_address != 0 && image_sharp_validator != nullptr &&
+                   !image_sharp_validator(image, is_depth)) {
             image = AmdGpu::Image::Null(is_depth);
         } else if (is_depth) {
             const auto data_fmt = image.GetDataFmt();

@@ -130,19 +130,24 @@ struct StageSpecialization {
                              spec.element_size = sharp.element_size;
                          }
                      });
-        ForEachSharp(binding, images, info->images,
-                     [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
-                         spec.type = sharp.GetViewType(desc.is_array);
-                         spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
-                         spec.is_storage = desc.is_written;
-                         if (spec.is_storage) {
-                             spec.dst_select = sharp.DstSelect();
-                         } else {
-                             spec.is_srgb = sharp.GetNumberFmt() == AmdGpu::NumberFormat::Srgb;
-                         }
-                         spec.num_conversion = sharp.GetNumberConversion();
-                         spec.num_bindings = desc.NumBindings(*info);
-                     });
+        // An empty image slot is still declared in the module, as whatever the null image
+        // decodes to. Record that instead of leaving the entry blank, so a draw that later
+        // binds a matching texture there reuses this module instead of compiling a new one.
+        for (const auto& desc : info->images) {
+            auto& spec = images.emplace_back();
+            const AmdGpu::Image sharp = desc.GetSharp(*info);
+            bitset[binding++] = bool(sharp);
+            spec.type = sharp.GetViewType(desc.is_array);
+            spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
+            spec.is_storage = desc.is_written;
+            if (spec.is_storage) {
+                spec.dst_select = sharp.DstSelect();
+            } else {
+                spec.is_srgb = sharp.GetNumberFmt() == AmdGpu::NumberFormat::Srgb;
+            }
+            spec.num_conversion = sharp.GetNumberConversion();
+            spec.num_bindings = desc.NumBindings(*info);
+        }
         ForEachSharp(binding, fmasks, info->fmasks,
                      [](auto& spec, const auto& desc, AmdGpu::Image sharp) {
                          spec.width = sharp.width;
@@ -212,9 +217,10 @@ struct StageSpecialization {
             return false;
         }
 
-        if (dead_resource_guards != other.dead_resource_guards) {
-            return false;
-        }
+        // dead_resource_guards is deliberately not compared. A dead guard only turns its
+        // images and samplers into null ones, which the per-resource checks below already
+        // cover. Comparing the mask as well made every new combination of material flags a
+        // new permutation even when an existing module fitted.
 
         // For VS which only generates geometry and doesn't have any inputs, its start
         // bindings still may change as they depend on previously processed FS. The check below

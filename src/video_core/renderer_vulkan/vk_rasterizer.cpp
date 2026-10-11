@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <bit>
+#include <cstring>
 #include <unordered_set>
 
 #include "common/debug.h"
@@ -46,6 +49,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       pipeline_cache{instance, scheduler, liverpool, buffer_cache.GetSparsePageShift()},
       host_markers_enabled{EmulatorSettings.IsVkHostMarkersEnabled()},
       guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
+    sharp_validator_instance = this;
+    Shader::image_sharp_validator = &Rasterizer::ValidateImageSharp;
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -853,6 +858,130 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     }
 }
 
+/// Shaders can declare textures they only sample behind a feature flag; the unused slots then
+/// hold arbitrary data that must not reach the texture cache.
+/// Returns the reason the descriptor cannot be a real texture, or nullptr if it can.
+const char* Rasterizer::ImageSharpRejectReason(const AmdGpu::Image& tsharp, bool is_depth) {
+    const auto data_fmt = tsharp.GetDataFmt();
+    const auto num_fmt = tsharp.GetNumberFmt();
+    if (!memory->IsValidGpuMapping(tsharp.Address(), 0)) {
+        return "address above 40 bits";
+    }
+    if (!magic_enum::enum_contains(data_fmt) || !magic_enum::enum_contains(num_fmt)) {
+        return "unknown format value";
+    }
+    if (!LiverpoolToVK::IsSurfaceFormatKnown(data_fmt, num_fmt)) {
+        return "format has no Vulkan equivalent";
+    }
+    const auto tile_mode = tsharp.GetTileMode();
+    if (!magic_enum::enum_contains(tile_mode)) {
+        return "unknown tile mode";
+    }
+    const auto array_mode = AmdGpu::GetArrayMode(tile_mode);
+    if (array_mode == AmdGpu::ArrayMode::ArrayLinearGeneral) {
+        return "linear general tiling";
+    }
+    // The texture cache cannot size macro tiled block compressed images (it asserts).
+    if (AmdGpu::IsMacroTiled(array_mode) && AmdGpu::IsBlockCoded(data_fmt)) {
+        return "macro tiled block format";
+    }
+    const u32 width = tsharp.width + 1;
+    const u32 height = tsharp.height + 1;
+    const u32 depth = tsharp.depth + 1;
+    if (tsharp.Pitch() < width) {
+        return "pitch smaller than width";
+    }
+    const auto type = static_cast<AmdGpu::ImageType>(tsharp.type);
+    const bool is_msaa = type == AmdGpu::ImageType::Color2DMsaa ||
+                         type == AmdGpu::ImageType::Color2DMsaaArray;
+    const bool is_volume = type == AmdGpu::ImageType::Color3D;
+    if (is_msaa) {
+        if (tsharp.last_level > 3) {
+            return "more than 8 samples";
+        }
+    } else if (const u32 max_dim = std::max({width, height, is_volume ? depth : 1u});
+               tsharp.last_level >= static_cast<u32>(std::bit_width(max_dim))) {
+        return "more mips than the size allows";
+    }
+    const u64 layers = tsharp.NumLayers();
+    const u64 rough_size = u64(tsharp.Pitch()) * height * (is_volume ? depth : layers);
+    if (layers > 2048 || rough_size > 256_MB) {
+        return "implausibly large";
+    }
+    const VideoCore::ImageInfo info{tsharp, Shader::ImageResource{.is_depth = is_depth}};
+    // Junk slots often decode as a tiny face with hundreds of layers or slices; tile
+    // padding then makes each one cost tens to hundreds of megabytes of guest memory.
+    // Measured on Tearaway Unfolded: 178 junk arrays (faces from 4x5 to 520x52 with up
+    // to 1873 layers) and 7 junk volumes (20x212 and 44x88 faces, up to 6152 slices).
+    // A real volume can be small and deep, though: Resogun samples a 128x128x1536 voxel
+    // volume. Keep volumes whose face is at least 64 texels on both sides.
+    const bool plausible_volume = is_volume && std::min(width, height) >= 64 &&
+                                  std::has_single_bit(width) && std::has_single_bit(height);
+    if (u64(width) * height < 256 * 256 && info.guest_size >= 16_MB &&
+        !plausible_volume) {
+        return "tiny face with a huge footprint";
+    }
+    // No real PS4 texture needs this much memory (seen: 12529x15676 with 11 mips).
+    if (info.guest_size > 512_MB) {
+        return "guest footprint over 512 MB";
+    }
+    // Nor does one need a face wider than 8K (seen: 12093x15306 with 6 mips, 149 MB,
+    // which aliased a real image and tripped the subresource barrier assert).
+    if (!is_volume && (width > 8192 || height > 8192)) {
+        return "face over 8192 px";
+    }
+    if (!IsMapped(info.guest_address, info.guest_size)) {
+        return "memory range not mapped";
+    }
+    return nullptr;
+}
+
+/// Installed as Shader::image_sharp_validator. Runs for every image of every draw, several
+/// times, so results are memoized until the guest memory map changes.
+bool Rasterizer::ValidateImageSharp(const AmdGpu::Image& tsharp, bool is_depth) {
+    Rasterizer* const self = sharp_validator_instance;
+    if (self == nullptr || tsharp.Address() == 0 ||
+        tsharp.GetDataFmt() == AmdGpu::DataFormat::FormatInvalid) {
+        return true;
+    }
+    struct Entry {
+        std::array<u64, 4> raw;
+        u64 generation;
+        bool is_depth;
+        bool valid;
+        bool ok;
+    };
+    static thread_local std::array<Entry, 1024> cache{};
+    static_assert(sizeof(AmdGpu::Image) == sizeof(Entry::raw));
+    std::array<u64, 4> raw;
+    std::memcpy(raw.data(), &tsharp, sizeof(raw));
+    const u64 hash = (raw[0] * 0x9E3779B97F4A7C15ULL) ^ (raw[1] * 0xC2B2AE3D27D4EB4FULL) ^
+                     (raw[2] * 0x165667B19E3779F9ULL) ^ raw[3] ^ u64(is_depth);
+    Entry& entry = cache[(hash >> 32) % cache.size()];
+    const u64 generation = self->mapped_generation.load(std::memory_order_relaxed);
+    if (entry.valid && entry.raw == raw && entry.is_depth == is_depth &&
+        entry.generation == generation) {
+        return entry.ok;
+    }
+    const char* const reason = self->ImageSharpRejectReason(tsharp, is_depth);
+    if (reason != nullptr) {
+        static std::atomic<u32> reported{};
+        if (reported.fetch_add(1) < 200) {
+            LOG_WARNING(Render_Vulkan,
+                        "Ignoring invalid T# ({}) address={:#x}, pitch={}, {}x{}x{}, layers={}, "
+                        "type={}, last_level={}, tile={}, data_format={}, num_format={}",
+                        reason, tsharp.Address(), tsharp.Pitch(), tsharp.width + 1,
+                        tsharp.height + 1, tsharp.depth + 1, tsharp.NumLayers(),
+                        static_cast<u32>(tsharp.type), static_cast<u32>(tsharp.last_level),
+                        static_cast<u32>(tsharp.tiling_index),
+                        static_cast<u32>(tsharp.GetDataFmt()),
+                        static_cast<u32>(tsharp.GetNumberFmt()));
+        }
+    }
+    entry = Entry{raw, generation, is_depth, true, reason == nullptr};
+    return entry.ok;
+}
+
 /// Marks a binding slot as empty. The slots are reused between draws, so the descriptor type
 /// has to be refreshed as well or a stale storage/sampled type gets written for this binding.
 static void BindNullImage(auto& binding, const Shader::ImageResource& image_desc) {
@@ -877,82 +1006,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             continue;
         }
 
-        // Shaders can declare textures they only sample behind a feature flag; the unused
-        // slots then hold arbitrary data that must not reach the texture cache.
-        // Returns the reason the descriptor cannot be a real texture, or nullptr if it can.
-        const auto tsharp_reject_reason = [&]() -> const char* {
-            if (!memory->IsValidGpuMapping(tsharp.Address(), 0)) {
-                return "address above 40 bits";
-            }
-            if (!magic_enum::enum_contains(data_fmt) || !magic_enum::enum_contains(num_fmt)) {
-                return "unknown format value";
-            }
-            if (!LiverpoolToVK::IsSurfaceFormatKnown(data_fmt, num_fmt)) {
-                return "format has no Vulkan equivalent";
-            }
-            const auto tile_mode = tsharp.GetTileMode();
-            if (!magic_enum::enum_contains(tile_mode)) {
-                return "unknown tile mode";
-            }
-            const auto array_mode = AmdGpu::GetArrayMode(tile_mode);
-            if (array_mode == AmdGpu::ArrayMode::ArrayLinearGeneral) {
-                return "linear general tiling";
-            }
-            // The texture cache cannot size macro tiled block compressed images (it asserts).
-            if (AmdGpu::IsMacroTiled(array_mode) && AmdGpu::IsBlockCoded(data_fmt)) {
-                return "macro tiled block format";
-            }
-            const u32 width = tsharp.width + 1;
-            const u32 height = tsharp.height + 1;
-            const u32 depth = tsharp.depth + 1;
-            if (tsharp.Pitch() < width) {
-                return "pitch smaller than width";
-            }
-            const auto type = static_cast<AmdGpu::ImageType>(tsharp.type);
-            const bool is_msaa = type == AmdGpu::ImageType::Color2DMsaa ||
-                                 type == AmdGpu::ImageType::Color2DMsaaArray;
-            const bool is_volume = type == AmdGpu::ImageType::Color3D;
-            if (is_msaa) {
-                if (tsharp.last_level > 3) {
-                    return "more than 8 samples";
-                }
-            } else if (const u32 max_dim = std::max({width, height, is_volume ? depth : 1u});
-                       tsharp.last_level >= static_cast<u32>(std::bit_width(max_dim))) {
-                return "more mips than the size allows";
-            }
-            const u64 layers = tsharp.NumLayers();
-            const u64 rough_size = u64(tsharp.Pitch()) * height * (is_volume ? depth : layers);
-            if (layers > 2048 || rough_size > 256_MB) {
-                return "implausibly large";
-            }
-            const VideoCore::ImageInfo info{tsharp, image_desc};
-            // Junk slots often decode as a tiny face with hundreds of layers or slices; tile
-            // padding then makes each one cost tens to hundreds of megabytes of guest memory.
-            // Measured on Tearaway Unfolded: 178 junk arrays (faces from 4x5 to 520x52 with up
-            // to 1873 layers) and 7 junk volumes (20x212 and 44x88 faces, up to 6152 slices).
-            // A real volume can be small and deep, though: Resogun samples a 128x128x1536 voxel
-            // volume. Keep volumes whose face is at least 64 texels on both sides.
-            const bool plausible_volume = is_volume && std::min(width, height) >= 64 &&
-                                          std::has_single_bit(width) && std::has_single_bit(height);
-            if (u64(width) * height < 256 * 256 && info.guest_size >= 16_MB &&
-                !plausible_volume) {
-                return "tiny face with a huge footprint";
-            }
-            // No real PS4 texture needs this much memory (seen: 12529x15676 with 11 mips).
-            if (info.guest_size > 512_MB) {
-                return "guest footprint over 512 MB";
-            }
-            // Nor does one need a face wider than 8K (seen: 12093x15306 with 6 mips, 149 MB,
-            // which aliased a real image and tripped the subresource barrier assert).
-            if (!is_volume && (width > 8192 || height > 8192)) {
-                return "face over 8192 px";
-            }
-            if (!IsMapped(info.guest_address, info.guest_size)) {
-                return "memory range not mapped";
-            }
-            return nullptr;
-        };
-        if (const char* reason = tsharp_reject_reason()) {
+        // GetSharp has already turned invalid descriptors into null images through the
+        // validator; this only catches a memory map change since then.
+        if (const char* reason = ImageSharpRejectReason(tsharp, image_desc.is_depth)) {
             LOG_WARNING(Render_Vulkan,
                         "Rejecting invalid T# ({}) address={:#x}, pitch={}, {}x{}x{}, layers={}, "
                         "type={}, last_level={}, tile={}, data_format={}, num_format={}",
@@ -1422,6 +1478,7 @@ void Rasterizer::MapMemory(VAddr addr, u64 size) {
         std::scoped_lock lock{mapped_ranges_mutex};
         mapped_ranges += decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
     }
+    ++mapped_generation;
 }
 
 void Rasterizer::RegisterMemory(VAddr addr, u64 size) {
@@ -1435,6 +1492,7 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
         std::scoped_lock lock{mapped_ranges_mutex};
         mapped_ranges -= decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
     }
+    ++mapped_generation;
 }
 
 void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {

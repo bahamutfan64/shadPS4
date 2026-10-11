@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -75,6 +76,8 @@ public:
     bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
     bool IsMapped(VAddr addr, u64 size);
+    const char* ImageSharpRejectReason(const AmdGpu::Image& tsharp, bool is_depth);
+    static bool ValidateImageSharp(const AmdGpu::Image& tsharp, bool is_depth);
     void MapMemory(VAddr addr, u64 size);
     void RegisterMemory(VAddr addr, u64 size);
     void UnmapMemory(VAddr addr, u64 size);
@@ -145,6 +148,8 @@ private:
     Core::MemoryManager* memory;
     boost::icl::interval_set<VAddr> mapped_ranges;
     Common::SharedFirstMutex mapped_ranges_mutex;
+    std::atomic<u64> mapped_generation{};
+    static inline Rasterizer* sharp_validator_instance = nullptr;
     PipelineCache pipeline_cache;
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
