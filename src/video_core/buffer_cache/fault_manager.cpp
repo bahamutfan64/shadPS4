@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/div_ceil.h"
+#include "core/memory.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -166,7 +167,23 @@ void FaultManager::ProcessFaultBuffer() {
         const u64* fault_buf = std::bit_cast<const u64*>(mapped);
         const u32 fault_count = fault_buf[0];
         for (u32 i = 1; i <= fault_count; ++i) {
-            fault_ranges.Add(fault_buf[i], sparse_pagesize);
+            // A shader that reads guest memory through the page table gets zeros for a page
+            // that is not resident yet, and the page only becomes resident for the next
+            // frame. Games that walk through an allocator (per-frame bone palettes) would
+            // fault on every new page, drawing one broken frame each time. Bring in the
+            // surrounding window as well, as far as it is mapped guest memory.
+            VAddr start = fault_buf[i];
+            u64 size = sparse_pagesize;
+            for (const u64 window : {u64{4} << 20, u64{1} << 20, u64{256} << 10}) {
+                const VAddr aligned = start & ~(window - 1);
+                if (window > sparse_pagesize &&
+                    Core::Memory::Instance()->IsValidMapping(aligned, window)) {
+                    start = aligned;
+                    size = window;
+                    break;
+                }
+            }
+            fault_ranges.Add(start, size);
             LOG_INFO(Render_Vulkan, "Accessed non-GPU cached memory at {:#x}", fault_buf[i]);
         }
         fault_ranges.ForEach([&](VAddr start, VAddr end) {
