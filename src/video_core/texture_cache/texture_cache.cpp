@@ -343,6 +343,15 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             return {merged_image_id ? merged_image_id : cache_image_id, -1, -1};
         }
 
+        // This can repeat every frame; report only the first few occurrences in detail.
+        static u32 unresolved_overlaps = 0;
+        if (++unresolved_overlaps > 8) {
+            if (safe_to_delete) {
+                FreeImage(cache_image_id);
+            }
+            return {merged_image_id, -1, -1};
+        }
+
         // Enhanced debug logging for unreachable case
         // Calculate expected size based on format and dimensions
         u64 expected_size =
@@ -458,7 +467,14 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                   merged_image_id.index, static_cast<int>(binding), scheduler.CurrentTick(),
                   scheduler.CurrentTick() - cache_image.tick_accessed_last);
 
-        UNREACHABLE_MSG("Encountered unresolvable image overlap with equal memory address.");
+        // No rule above explains how the two descriptions relate (seen with the same volume
+        // described with a depth of 1 and then 2). Treat it like the other address reuse cases
+        // instead of aborting: drop the cached image once it is idle and let the caller create
+        // an image for the new description.
+        if (safe_to_delete) {
+            FreeImage(cache_image_id);
+        }
+        return {merged_image_id, -1, -1};
     }
 
     // Right overlap, the image requested is a possible subresource of the image from cache.
