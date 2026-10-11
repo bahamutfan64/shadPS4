@@ -1353,25 +1353,6 @@ u32 Rasterizer::ReadDataFromGds(u32 gds_offset) {
     return value;
 }
 
-bool Rasterizer::IsRegionGpuModified(VAddr addr, u64 size) {
-    return buffer_cache.IsRegionGpuModified(addr, size);
-}
-
-void Rasterizer::ReportZeroCountDraw(const char* packet, VAddr count_addr) {
-    // Diagnostic: a game that issues many zero-count direct draws may be patching the counts on
-    // the GPU after this parser has read them. Say whether the count field is GPU-modified memory.
-    static u32 total = 0;
-    static u32 gpu_modified = 0;
-    const bool is_gpu = IsRegionGpuModified(count_addr, sizeof(u32));
-    ++total;
-    gpu_modified += is_gpu ? 1 : 0;
-    if (total % 500 == 1) {
-        LOG_WARNING(Render_Vulkan,
-                    "Zero-count {} #{} at {:#x}: count field gpu-modified={} (gpu-modified so far {})",
-                    packet, total, count_addr, is_gpu, gpu_modified);
-    }
-}
-
 bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
     if (!IsMapped(addr, size)) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
