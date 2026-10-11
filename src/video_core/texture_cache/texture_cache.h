@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -118,6 +119,15 @@ public:
 
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);
+
+    /// Changes whenever an image is registered or unregistered. A FindImage result stays
+    /// valid for the same description for as long as this value does not change.
+    [[nodiscard]] u64 RegistryGeneration() const noexcept {
+        return registry_generation.load(std::memory_order_relaxed);
+    }
+
+    /// What FindImage does to an image it returns, for callers that reuse an earlier result.
+    void MarkAccessed(ImageId image_id);
 
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
@@ -334,6 +344,8 @@ private:
     void DeleteImage(ImageId image_id);
 
     /// Touch the image in the LRU cache.
+    std::atomic<u64> registry_generation{};
+
     void TouchImage(Image& image) {
         image_lru_cache.Touch(image, gc_tick);
     }

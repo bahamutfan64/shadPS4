@@ -159,6 +159,16 @@ private:
         VideoCore::TextureCache::ImageDesc desc;
     };
     std::array<ImageBinding, Shader::NUM_IMAGES> image_bindings;
+    /// Remembered BindTextures lookups, see there. Direct mapped by a hash of the T#.
+    struct TextureLookup {
+        std::array<u64, 4> raw{};
+        u64 generation{};
+        u32 flags{};
+        bool valid{};
+        VideoCore::ImageId image_id{};
+        VideoCore::TextureCache::ImageDesc desc{};
+    };
+    std::vector<TextureLookup> texture_lookups{1024};
     std::array<ImageBinding, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     ImageBinding db_desc;
 

@@ -999,63 +999,68 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     for (const auto& image_desc : stage.images) {
         const auto tsharp = image_desc.GetSharp(stage);
         const auto data_fmt = tsharp.GetDataFmt();
-        const auto num_fmt = tsharp.GetNumberFmt();
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {
             BindNullImage(image_bindings[num_images++], image_desc);
             image_descriptor_array_sizes.push_back(1);
             continue;
         }
 
-        // GetSharp has already turned invalid descriptors into null images through the
-        // validator; this only catches a memory map change since then.
-        if (const char* reason = ImageSharpRejectReason(tsharp, image_desc.is_depth)) {
-            LOG_WARNING(Render_Vulkan,
-                        "Rejecting invalid T# ({}) address={:#x}, pitch={}, {}x{}x{}, layers={}, "
-                        "type={}, last_level={}, tile={}, data_format={}, num_format={}",
-                        reason, tsharp.Address(), tsharp.Pitch(), tsharp.width + 1,
-                        tsharp.height + 1, tsharp.depth + 1, tsharp.NumLayers(),
-                        static_cast<u32>(tsharp.type), static_cast<u32>(tsharp.last_level),
-                        static_cast<u32>(tsharp.tiling_index), static_cast<u32>(data_fmt),
-                        static_cast<u32>(num_fmt));
-            BindNullImage(image_bindings[num_images++], image_desc);
-            image_descriptor_array_sizes.push_back(1);
-            continue;
-        }
-
-        // Diagnostic: report each large texture a shader binds, once, to see what fills memory.
-        if (const VideoCore::ImageInfo big_info{tsharp, image_desc};
-            big_info.guest_size >= 32_MB) {
-            static std::unordered_set<u64> reported;
-            const u64 key = big_info.guest_address ^ (u64(big_info.guest_size) << 40);
-            if (reported.insert(key).second) {
-                LOG_WARNING(Render_Vulkan,
-                            "Large T# accepted: address={:#x} size={} MB {}x{}x{} levels={} "
-                            "layers={} data_format={} num_format={} tile={} written={}",
-                            big_info.guest_address, big_info.guest_size >> 20,
-                            big_info.size.width, big_info.size.height, big_info.size.depth,
-                            big_info.resources.levels, big_info.resources.layers,
-                            static_cast<u32>(data_fmt), static_cast<u32>(num_fmt),
-                            static_cast<u32>(big_info.tile_mode), image_desc.is_written);
-            }
-        }
+        // Invalid descriptors never get here: GetSharp turns them into null images through
+        // the validator, so there is no second reject test (it built a full ImageInfo for
+        // every texture of every draw).
 
         const Shader::MipStorageFallbackMode mip_fallback_mode = image_desc.mip_fallback_mode;
         const u32 num_bindings = image_desc.NumBindings(stage);
 
         for (auto i = 0; i < num_bindings; i++) {
             auto& [image_id, desc] = image_bindings[num_images++];
-            std::construct_at(&desc, tsharp, image_desc);
 
-            if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
-                ASSERT(num_bindings == 1);
-                desc.view_info.range.base.level += image_desc.constant_mip_index;
-                desc.view_info.range.extent.levels = 1;
-            } else if (mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
-                desc.view_info.range.base.level += i;
-                desc.view_info.range.extent.levels = 1;
+            // Most draws bind the same textures as an earlier one. Building the description
+            // (mip layout and sizes) and searching the cache for it was a large part of the
+            // GPU thread's time, so remember the result until the set of cached images changes.
+            TextureLookup* lookup = nullptr;
+            std::array<u64, 4> raw{};
+            u32 lookup_flags = 0;
+            if (mip_fallback_mode == Shader::MipStorageFallbackMode::None) {
+                static_assert(sizeof(tsharp) == sizeof(raw));
+                std::memcpy(raw.data(), &tsharp, sizeof(raw));
+                lookup_flags = u32(image_desc.is_depth) | u32(image_desc.is_array) << 1 |
+                               u32(image_desc.is_written) << 2 | u32(image_desc.is_atomic) << 3 |
+                               u32(image_desc.is_r128) << 4;
+                const u64 hash = (raw[0] * 0x9E3779B97F4A7C15ULL) ^
+                                 (raw[1] * 0xC2B2AE3D27D4EB4FULL) ^
+                                 (raw[2] * 0x165667B19E3779F9ULL) ^ raw[3] ^ lookup_flags;
+                lookup = &texture_lookups[(hash >> 32) % texture_lookups.size()];
             }
+            if (lookup != nullptr && lookup->valid && lookup->raw == raw &&
+                lookup->flags == lookup_flags &&
+                lookup->generation == texture_cache.RegistryGeneration()) {
+                desc = lookup->desc;
+                image_id = lookup->image_id;
+                texture_cache.MarkAccessed(image_id);
+            } else {
+                std::construct_at(&desc, tsharp, image_desc);
 
-            image_id = texture_cache.FindImage(desc);
+                if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
+                    ASSERT(num_bindings == 1);
+                    desc.view_info.range.base.level += image_desc.constant_mip_index;
+                    desc.view_info.range.extent.levels = 1;
+                } else if (mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
+                    desc.view_info.range.base.level += i;
+                    desc.view_info.range.extent.levels = 1;
+                }
+
+                image_id = texture_cache.FindImage(desc);
+                if (lookup != nullptr) {
+                    // Read the generation after the search: it may have registered the image.
+                    lookup->raw = raw;
+                    lookup->flags = lookup_flags;
+                    lookup->generation = texture_cache.RegistryGeneration();
+                    lookup->image_id = image_id;
+                    lookup->desc = desc;
+                    lookup->valid = true;
+                }
+            }
             auto* image = &texture_cache.GetImage(image_id);
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
                 // If this image has an associated depth image, it's a stencil attachment.
