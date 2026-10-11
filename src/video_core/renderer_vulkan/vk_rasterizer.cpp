@@ -935,6 +935,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             if (info.guest_size > 512_MB) {
                 return "guest footprint over 512 MB";
             }
+            // Nor does one need a face wider than 8K (seen: 12093x15306 with 6 mips, 149 MB,
+            // which aliased a real image and tripped the subresource barrier assert).
+            if (!is_volume && (width > 8192 || height > 8192)) {
+                return "face over 8192 px";
+            }
             if (!IsMapped(info.guest_address, info.guest_size)) {
                 return "memory range not mapped";
             }
