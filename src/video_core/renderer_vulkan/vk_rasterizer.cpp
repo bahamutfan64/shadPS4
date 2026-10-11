@@ -443,7 +443,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     }
 
     if (uses_dma) {
-        buffer_cache.SynchronizeDmaBuffers();
+        buffer_cache.SynchronizeDmaBuffers(liverpool->ResumeSerial());
     }
 
     return true;
@@ -1452,6 +1452,16 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
     buffer_cache.InvalidateMemory(addr, size, assume_locks);
     texture_cache.InvalidateMemory(addr, size);
     return true;
+}
+
+void Rasterizer::InvalidateBufferBlock(VAddr addr, u64 size, bool assume_locks) {
+    // Only the buffer cache: textures keep their own page watches. Leave a block alone if it
+    // is not fully mapped, or if the GPU wrote to part of it (marking that CPU-modified would
+    // upload stale guest memory over the GPU's data).
+    if (!IsMapped(addr, size) || buffer_cache.IsRegionGpuModified(addr, size)) {
+        return;
+    }
+    buffer_cache.InvalidateMemory(addr, size, assume_locks);
 }
 
 bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {

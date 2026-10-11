@@ -79,6 +79,10 @@ public:
         submit_cv.notify_one();
     }
 
+    [[nodiscard]] u64 ResumeSerial() const noexcept {
+        return resume_serial;
+    }
+
     void WaitGpuIdle() noexcept {
         std::unique_lock lk{submit_mutex};
         submit_cv.wait(lk, [this] { return num_submits == 0; });
@@ -233,6 +237,8 @@ private:
     const bool guest_markers_enabled;
     std::jthread process_thread{};
     std::atomic<u32> num_submits{};
+    /// Counts command buffer resumptions; a new value means new guest data may be in use.
+    u64 resume_serial{};
     std::atomic<u32> num_commands{};
     std::atomic<bool> submit_done{};
     std::mutex submit_mutex;

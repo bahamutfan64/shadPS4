@@ -101,7 +101,7 @@ public:
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
 
     /// Synchronizes all buffers needed for DMA.
-    void SynchronizeDmaBuffers();
+    void SynchronizeDmaBuffers(u64 submit_serial);
     void MarkDmaDirty() noexcept {
         dma_dirty.store(true, std::memory_order_relaxed);
     }
@@ -153,7 +153,8 @@ private:
     bool fault_process_pending{};
     /// Set whenever guest memory may have changed under a resident range.
     std::atomic<bool> dma_dirty{true};
-    bool dma_sync_skip{};
+    std::atomic<bool> dma_new_resident{true};
+    u64 dma_synced_serial{~0ULL};
 
     std::array<const Buffer*, NUM_ARENA_PAGES> address_space{};
     std::deque<Buffer> arenas;

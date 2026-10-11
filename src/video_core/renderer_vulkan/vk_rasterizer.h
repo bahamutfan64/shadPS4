@@ -76,6 +76,7 @@ public:
     bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
     bool IsMapped(VAddr addr, u64 size);
+    void InvalidateBufferBlock(VAddr addr, u64 size, bool assume_locks);
     const char* ImageSharpRejectReason(const AmdGpu::Image& tsharp, bool is_depth);
     static bool ValidateImageSharp(const AmdGpu::Image& tsharp, bool is_depth);
     void MapMemory(VAddr addr, u64 size);

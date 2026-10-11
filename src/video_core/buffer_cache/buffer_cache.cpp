@@ -215,17 +215,20 @@ bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {
     return memory_tracker->IsRegionGpuModified(addr, size);
 }
 
-void BufferCache::SynchronizeDmaBuffers() {
+void BufferCache::SynchronizeDmaBuffers(u64 submit_serial) {
     fault_process_pending = true;
-    static const bool skip_enabled = [] {
-        const char* v = std::getenv("SHADPS4_DMA_SYNC_SKIP");
+    static const bool per_submit = [] {
+        const char* v = std::getenv("SHADPS4_DMA_SYNC_PER_SUBMIT");
         return v != nullptr && v[0] == '1';
     }();
-    // Experimental: nothing can need an upload if no write was recorded since the last pass.
-    if (skip_enabled && !dma_dirty.exchange(false, std::memory_order_relaxed)) {
+    // Experimental: everything a command buffer reads was written before it was submitted,
+    // so one pass per resumed command buffer is enough, unless new memory became resident.
+    const bool new_resident = dma_new_resident.exchange(false, std::memory_order_relaxed);
+    if (per_submit && submit_serial == dma_synced_serial && !new_resident) {
         ++Common::FrameProbe::sec_dma_skipped.count;
         return;
     }
+    dma_synced_serial = submit_serial;
     Common::FrameProbe::Scope probe{Common::FrameProbe::sec_dma_sync};
     for (const auto& range : resident_ranges) {
         ++Common::FrameProbe::sec_dma_sync.bytes;
@@ -302,6 +305,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         return;
     }
     dma_dirty.store(true, std::memory_order_relaxed);
+    dma_new_resident.store(true, std::memory_order_relaxed);
     Common::FrameProbe::Scope probe{Common::FrameProbe::make_resident,
                                     u64(resident_blocks) << block_shift};
 

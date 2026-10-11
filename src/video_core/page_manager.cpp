@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <bit>
+#include <cstdlib>
 #include <utility>
 #include "common/adaptive_mutex.h"
 #include "common/assert.h"
@@ -439,7 +441,19 @@ struct SignalImpl : public PageManager::Impl {
             std::this_thread::get_id() == rasterizer->GetGpuCommandProcessorThread();
         if (Common::IsWriteError(context)) {
             Common::FrameProbe::Scope probe{Common::FrameProbe::sec_write_fault};
-            return rasterizer->InvalidateMemory(addr, size, is_gpu_thread);
+            const bool handled = rasterizer->InvalidateMemory(addr, size, is_gpu_thread);
+            // Experimental: a game filling a buffer faults once per 4 KB page. Release the
+            // rest of the surrounding block as well so the following pages do not fault.
+            static const u64 block_size = [] {
+                const char* v = std::getenv("SHADPS4_FAULT_BLOCK_KB");
+                const u64 kb = v != nullptr ? std::strtoull(v, nullptr, 10) : 0;
+                return kb >= 8 && kb <= 1024 && std::has_single_bit(kb) ? kb * 1024 : 0;
+            }();
+            if (handled && block_size != 0) {
+                rasterizer->InvalidateBufferBlock(addr & ~(block_size - 1), block_size,
+                                                  is_gpu_thread);
+            }
+            return handled;
         } else {
             return rasterizer->ReadMemory(addr, size, is_gpu_thread);
         }

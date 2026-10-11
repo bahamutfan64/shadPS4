@@ -123,6 +123,7 @@ void Liverpool::Process(std::stop_token stoken) {
                 }
                 task = queue.submits.front();
             }
+            ++resume_serial;
             task.resume();
 
             if (task.done()) {
