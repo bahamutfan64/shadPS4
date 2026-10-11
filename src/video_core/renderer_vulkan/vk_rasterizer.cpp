@@ -932,7 +932,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             // to 1873 layers) and 7 junk volumes (20x212 and 44x88 faces, up to 6152 slices).
             // A real volume can be small and deep, though: Resogun samples a 128x128x1536 voxel
             // volume. Keep volumes whose face is at least 64 texels on both sides.
-            const bool plausible_volume = is_volume && std::min(width, height) >= 64;
+            const bool plausible_volume = is_volume && std::min(width, height) >= 64 &&
+                                          std::has_single_bit(width) && std::has_single_bit(height);
             if (u64(width) * height < 256 * 256 && info.guest_size >= 16_MB &&
                 !plausible_volume) {
                 return "tiny face with a huge footprint";
