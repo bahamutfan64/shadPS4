@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <algorithm>
 #include <span>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -175,13 +174,6 @@ struct Info : InfoPersistent {
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
         if (srt_info.walker_func) {
             srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
-        }
-        // EXPERIMENT (Tearaway Unfolded petals): this particle vertex shader projects into the
-        // shadow map with 12 dwords of its constant struct (+0x80..+0xAC) that the game never
-        // writes; the leftovers there make near petals black. Zero them to see whether a
-        // zero-filled block (as fresh PS4 memory would be) restores the lighting.
-        if (pgm_hash == 0x8f34ffa4ULL && flattened_ud_buf.size() >= 0x2c) {
-            std::fill(flattened_ud_buf.begin() + 0x20, flattened_ud_buf.begin() + 0x2c, 0u);
         }
         RefreshResourceGuards();
     }
