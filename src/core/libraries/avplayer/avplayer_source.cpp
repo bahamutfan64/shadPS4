@@ -384,11 +384,28 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfo& video_info) {
 }
 
 bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
+    // DIAGNOSTIC (Resogun black title video): tally why frames are or are not handed out.
+    static u32 calls = 0, inactive = 0, no_frames = 0, too_early = 0, delivered = 0;
+    const auto report = [&](u64 front_ts, u64 now_ts) {
+        if (++calls % 240 == 1) {
+            LOG_INFO(Lib_AvPlayer,
+                     "GetVideoData #{}: inactive/paused {}, no frames {}, too early {}, "
+                     "delivered {}; active={} paused={} eof={} queued frames={} packets={} "
+                     "free buffers={} front ts={} now={}",
+                     calls, inactive, no_frames, too_early, delivered, IsActive(),
+                     m_is_paused.load(), m_is_eof.load(), m_video_frames.Size(),
+                     m_video_packets.Size(), m_video_buffers.Size(), front_ts, now_ts);
+        }
+    };
     if (!IsActive() || m_is_paused) {
+        ++inactive;
+        report(0, 0);
         return false;
     }
 
     if (m_video_frames.Size() == 0) {
+        ++no_frames;
+        report(0, CurrentTime());
         return false;
     }
 
@@ -396,9 +413,13 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
     const auto& new_frame = m_video_frames.Front();
     if (m_state.GetSyncMode() == AvPlayerAvSyncMode::Default) {
         if (new_frame.info.timestamp > current_time) {
+            ++too_early;
+            report(new_frame.info.timestamp, current_time);
             return false;
         }
     }
+    ++delivered;
+    report(new_frame.info.timestamp, current_time);
 
     if (m_current_video_frame.has_value()) {
         m_video_buffers.Push(std::move(m_current_video_frame->buffer));
