@@ -928,12 +928,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             const VideoCore::ImageInfo info{tsharp, image_desc};
             // Junk slots often decode as a tiny face with hundreds of layers or slices; tile
             // padding then makes each one cost tens to hundreds of megabytes of guest memory.
-            // A real small volume or array is roughly as deep as it is wide (Resogun samples a
-            // 128x128x128 voxel volume), so only stacks far deeper than the face are junk
-            // (Tearaway's were 4x5 with 1254 slices).
-            const u64 stack = is_volume ? depth : layers;
+            // Measured on Tearaway Unfolded: 178 junk arrays (faces from 4x5 to 520x52 with up
+            // to 1873 layers) and 7 junk volumes (20x212 and 44x88 faces, up to 6152 slices).
+            // A real volume can be small and deep, though: Resogun samples a 128x128x1536 voxel
+            // volume. Keep volumes whose face is at least 64 texels on both sides.
+            const bool plausible_volume = is_volume && std::min(width, height) >= 64;
             if (u64(width) * height < 256 * 256 && info.guest_size >= 16_MB &&
-                stack > 4 * u64(std::max(width, height))) {
+                !plausible_volume) {
                 return "tiny face with a huge footprint";
             }
             // No real PS4 texture needs this much memory (seen: 12529x15676 with 11 mips).
