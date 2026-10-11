@@ -1033,6 +1033,21 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             bound_images.emplace_back(image_id);
 
             auto& image = texture_cache.GetImage(image_id);
+            // The descriptor can resolve to a cached image with fewer mips or layers than it
+            // asks for (a view redirected to the depth buffer, or a bogus descriptor aliasing a
+            // real image). Keep the view inside the image, or the view is invalid and the
+            // layout transition below indexes past the image's subresources.
+            {
+                auto& range = desc.view_info.range;
+                const u32 levels = image.info.resources.levels;
+                const u32 layers = image.info.resources.layers;
+                range.base.level = static_cast<u16>(std::min<u32>(range.base.level, levels - 1));
+                range.base.layer = static_cast<u16>(std::min<u32>(range.base.layer, layers - 1));
+                range.extent.levels = static_cast<u16>(
+                    std::min<u32>(range.extent.levels, levels - range.base.level));
+                range.extent.layers = static_cast<u16>(
+                    std::min<u32>(range.extent.layers, layers - range.base.layer));
+            }
             auto& image_view = texture_cache.FindTexture(image_id, desc);
             const auto binding = image.binding;
 
