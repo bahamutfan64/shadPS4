@@ -175,8 +175,12 @@ bool AvPlayerState::GetStreamInfo(u32 stream_index, AvPlayerStreamInfo& info) {
 
 // Called inside GAME thread
 bool AvPlayerState::Start() {
-    std::unique_lock lock(m_source_mutex);
-    if (m_current_state == AvState::Ready || m_current_state == AvState::Stop || Stop()) {
+    {
+        std::unique_lock lock(m_source_mutex);
+        if (m_current_state != AvState::Ready && m_current_state != AvState::Stop && !Stop()) {
+            LOG_ERROR(Lib_AvPlayer, "Could not start playback.");
+            return false;
+        }
         m_eof_stop_event_sent = false;
         SetState(AvState::Starting);
         if (!m_up_source->Start()) {
@@ -185,12 +189,13 @@ bool AvPlayerState::Start() {
             return false;
         }
         SetState(AvState::Play);
-        OnPlaybackStateChanged(AvState::Play);
-        return true;
     }
-
-    LOG_ERROR(Lib_AvPlayer, "Could not start playback.");
-    return false;
+    // The Play event goes to the game's callback, which may call back into the player
+    // (Resogun calls sceAvPlayerStreamCount from it). Those calls take m_source_mutex, so the
+    // event must be sent after the exclusive lock is released or the thread deadlocks on itself
+    // and every later player call from the game blocks behind it.
+    OnPlaybackStateChanged(AvState::Play);
+    return true;
 }
 
 // Called inside GAME thread
