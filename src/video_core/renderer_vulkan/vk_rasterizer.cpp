@@ -952,10 +952,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         };
         if (const char* reason = tsharp_reject_reason()) {
             LOG_WARNING(Render_Vulkan,
-                        "Rejecting invalid T# ({}) address={:#x}, pitch={}, width={}, "
-                        "data_format={}, num_format={}",
-                        reason, tsharp.Address(), tsharp.pitch, tsharp.width,
-                        static_cast<u32>(data_fmt), static_cast<u32>(num_fmt));
+                        "Rejecting invalid T# ({}) address={:#x}, pitch={}, {}x{}x{}, layers={}, "
+                        "type={}, last_level={}, tile={}, data_format={}, num_format={}",
+                        reason, tsharp.Address(), tsharp.Pitch(), tsharp.width + 1,
+                        tsharp.height + 1, tsharp.depth + 1, tsharp.NumLayers(),
+                        static_cast<u32>(tsharp.type), static_cast<u32>(tsharp.last_level),
+                        static_cast<u32>(tsharp.tiling_index), static_cast<u32>(data_fmt),
+                        static_cast<u32>(num_fmt));
             BindNullImage(image_bindings[num_images++], image_desc);
             image_descriptor_array_sizes.push_back(1);
             continue;
