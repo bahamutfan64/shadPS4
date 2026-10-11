@@ -928,7 +928,12 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             const VideoCore::ImageInfo info{tsharp, image_desc};
             // Junk slots often decode as a tiny face with hundreds of layers or slices; tile
             // padding then makes each one cost tens to hundreds of megabytes of guest memory.
-            if (u64(width) * height < 256 * 256 && info.guest_size >= 16_MB) {
+            // A real small volume or array is roughly as deep as it is wide (Resogun samples a
+            // 128x128x128 voxel volume), so only stacks far deeper than the face are junk
+            // (Tearaway's were 4x5 with 1254 slices).
+            const u64 stack = is_volume ? depth : layers;
+            if (u64(width) * height < 256 * 256 && info.guest_size >= 16_MB &&
+                stack > 4 * u64(std::max(width, height))) {
                 return "tiny face with a huge footprint";
             }
             // No real PS4 texture needs this much memory (seen: 12529x15676 with 11 mips).
