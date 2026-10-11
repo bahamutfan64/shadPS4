@@ -12,12 +12,57 @@
 namespace Shader::Optimization {
 
 static constexpr u32 NumUserClipPlanes = 6;
+static constexpr u32 NumClipDistances = 8;
+
+// Near plane of the guest clip volume for a geometry shader: every emitted vertex gets a clip
+// distance from the position stored just before it. Outputs are undefined after EmitVertex, so
+// all slots are written each time.
+static void LowerNearClipGeometry(IR::Program& program, const RuntimeInfo& runtime_info) {
+    const u32 near_clip_mode = runtime_info.hw.gs.near_clip_mode;
+    if (near_clip_mode == 0) {
+        return;
+    }
+    for (u32 i = 0; i < runtime_info.hw.gs.num_outputs; ++i) {
+        for (const auto output : runtime_info.hw.gs.outputs[i]) {
+            if (output >= Output::ClipDist0 && output <= Output::ClipDist7) {
+                return;
+            }
+        }
+    }
+    for (IR::Block* const block : program.blocks) {
+        std::array<IR::Value, 4> position{};
+        for (auto inst = block->begin(); inst != block->end(); ++inst) {
+            if (inst->GetOpcode() == IR::Opcode::SetAttribute &&
+                inst->Arg(0).Attribute() == IR::Attribute::Position0) {
+                position[inst->Arg(2).U32()] = inst->Arg(1);
+                continue;
+            }
+            if (inst->GetOpcode() != IR::Opcode::EmitVertex ||
+                std::ranges::any_of(position, [](const IR::Value& v) { return v.IsEmpty(); })) {
+                continue;
+            }
+            IR::IREmitter ir{*block, inst};
+            IR::F32 distance{position[2]};
+            if (near_clip_mode == 2) {
+                distance = IR::F32{ir.FPAdd(distance, IR::F32{position[3]})};
+            }
+            ir.SetAttribute(IR::Attribute::ClipDistance, distance, 0);
+            for (u32 slot = 1; slot < NumClipDistances; ++slot) {
+                ir.SetAttribute(IR::Attribute::ClipDistance, ir.Imm32(0.0f), slot);
+            }
+        }
+    }
+}
 
 // Lowers the fixed-function user clip planes in PA_CL_UCP_*, enabled by the UCP_ENA bits of
 // PA_CL_CLIP_CNTL, to clip distances. Planes apply to the post-transform position and change per
 // draw, so they are supplied through a per-draw uniform buffer.
 void LowerUserClipPlanes(IR::Program& program, const RuntimeInfo& runtime_info) {
     Info& info = program.info;
+    if (info.hw_stage == HwStage::Geometry) {
+        LowerNearClipGeometry(program, runtime_info);
+        return;
+    }
     if (info.hw_stage != HwStage::Vertex) {
         return;
     }

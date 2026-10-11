@@ -162,6 +162,14 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
         info.hw.gs.vs_copy_hash = params_vc.hash;
         DumpShader(info.hw.gs.vs_copy, info.hw.gs.vs_copy_hash, Shader::HwStage::Vertex, 0,
                    "copy.bin");
+        // A geometry shader writes real clip distances, so its near plane needs no fragment
+        // stage counterpart.
+        info.hw.gs.near_clip_mode = 0;
+        if (!regs.IsClipDisabled() && !regs.clipper_control.zclip_near_disable &&
+            regs.clipper_control.zclip_far_disable) {
+            info.hw.gs.near_clip_mode =
+                regs.clipper_control.clip_space == AmdGpu::ClipSpace::ZeroToW ? 1 : 2;
+        }
         break;
     }
     case HwStage::Vertex: {

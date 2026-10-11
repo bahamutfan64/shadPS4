@@ -153,13 +153,15 @@ struct HwGeometryRuntimeInfo {
     AmdGpu::GsScenario mode;
     std::span<const u32> vs_copy;
     u64 vs_copy_hash;
+    /// Same meaning as HwVertexRuntimeInfo::near_clip_mode, for draws with a geometry shader.
+    u32 near_clip_mode{};
 
     bool operator==(const HwGeometryRuntimeInfo& other) const {
         return num_outputs == other.num_outputs && outputs == other.outputs &&
                num_invocations == other.num_invocations &&
                output_vertices == other.output_vertices && in_primitive == other.in_primitive &&
                std::ranges::equal(out_primitive, other.out_primitive) &&
-               vs_copy_hash == other.vs_copy_hash;
+               vs_copy_hash == other.vs_copy_hash && near_clip_mode == other.near_clip_mode;
     }
 };
 
