@@ -260,15 +260,18 @@ struct ImageResource {
         }
         if (!image.Valid() || (image.base_address != 0 && !IsPlausibleImageSharp(image))) {
             image = AmdGpu::Image::Null(is_depth);
-        } else if (image.base_address != 0 && image_sharp_validator != nullptr &&
-                   !image_sharp_validator(image, is_depth)) {
-            image = AmdGpu::Image::Null(is_depth);
         } else if (is_depth) {
             const auto data_fmt = image.GetDataFmt();
             if (data_fmt != AmdGpu::DataFormat::Format16 &&
                 data_fmt != AmdGpu::DataFormat::Format32) {
                 image = AmdGpu::Image::Null(true);
             }
+        }
+        // Must come after the depth format check: the validator sizes the image, which
+        // asserts on a depth slot holding a colour format.
+        if (image.base_address != 0 && image_sharp_validator != nullptr &&
+            !image_sharp_validator(image, is_depth)) {
+            image = AmdGpu::Image::Null(is_depth);
         }
         return image;
     }
