@@ -914,11 +914,13 @@ const char* Rasterizer::ImageSharpRejectReason(const AmdGpu::Image& tsharp, bool
     // Measured on Tearaway Unfolded: 178 junk arrays (faces from 4x5 to 520x52 with up
     // to 1873 layers) and 7 junk volumes (20x212 and 44x88 faces, up to 6152 slices).
     // A real volume can be small and deep, though: Resogun samples a 128x128x1536 voxel
-    // volume. Keep volumes whose face is at least 64 texels on both sides.
-    const bool plausible_volume = is_volume && std::min(width, height) >= 64 &&
-                                  std::has_single_bit(width) && std::has_single_bit(height);
-    if (u64(width) * height < 256 * 256 && info.guest_size >= 16_MB &&
-        !plausible_volume) {
+    // volume, and a real array can be small and long: Matterfall samples an array of 33
+    // reflection cubes, 128x128 half-float with 8 mips (198 faces padded to 256), and
+    // without it the whole level is lit white. Keep any image whose face is a power of
+    // two of at least 64 texels on both sides; none of the junk faces were.
+    const bool plausible_face = std::min(width, height) >= 64 && std::has_single_bit(width) &&
+                                std::has_single_bit(height);
+    if (u64(width) * height < 256 * 256 && info.guest_size >= 16_MB && !plausible_face) {
         return "tiny face with a huge footprint";
     }
     // No real PS4 texture needs this much memory (seen: 12529x15676 with 11 mips).
