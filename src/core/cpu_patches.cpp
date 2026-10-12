@@ -1527,6 +1527,132 @@ std::optional<std::vector<uintptr_t>> ResolveBoundedJumpTable(
     return resolved_targets;
 }
 
+bool IsFramePointerRegister(ZydisRegister reg) {
+    return reg != ZYDIS_REGISTER_NONE &&
+           ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, reg) == ZYDIS_REGISTER_RBP;
+}
+
+/// Red-zone accesses made through the frame pointer. A function that sets rbp = rsp in its
+/// prologue and then pushes callee-saved registers has rbp = rsp + K, and the compiler addresses
+/// locals below rsp as [rbp - disp] rather than [rsp - disp]. DecodeCodeInstruction only models
+/// rsp-relative operands, so such a function was not protected at all: a page fault in it
+/// (Matterfall builds index buffers in GPU memory this way) let Windows exception dispatch
+/// overwrite its locals. K is propagated along the control flow from the mov rbp, rsp; where it
+/// is unknown, because rbp is a plain register or paths disagree, nothing changes.
+void ModelFramePointerRedZone(DecodedFunction& function, uintptr_t function_start) {
+    if (!function.instructions.contains(function_start)) {
+        return;
+    }
+    // rbp - rsp before each visited instruction; nullopt = unknown.
+    std::map<uintptr_t, std::optional<s64>> distance_in;
+    distance_in.emplace(function_start, std::nullopt);
+    std::vector<uintptr_t> work{function_start};
+    const auto transfer = [](const DecodedCodeInstruction& decoded,
+                             std::optional<s64> distance) -> std::optional<s64> {
+        const auto& operands = decoded.operands;
+        if (decoded.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+            operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+            operands[0].reg.value == ZYDIS_REGISTER_RBP &&
+            operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+            operands[1].reg.value == ZYDIS_REGISTER_RSP) {
+            return 0;
+        }
+        if (WritesRegister(decoded, ZYDIS_REGISTER_RBP)) {
+            return std::nullopt;
+        }
+        if (decoded.changes_stack_pointer) {
+            if (distance.has_value() && decoded.stack_pointer_delta.has_value()) {
+                return *distance - *decoded.stack_pointer_delta;
+            }
+            return std::nullopt;
+        }
+        return distance;
+    };
+    while (!work.empty()) {
+        const uintptr_t address = work.back();
+        work.pop_back();
+        const auto instruction = function.instructions.find(address);
+        if (instruction == function.instructions.end()) {
+            continue;
+        }
+        const auto& decoded = instruction->second;
+        const std::optional<s64> out = transfer(decoded, distance_in.at(address));
+        const auto propagate = [&](uintptr_t successor) {
+            if (!function.instructions.contains(successor)) {
+                return;
+            }
+            const auto [slot, inserted] = distance_in.try_emplace(successor, out);
+            if (inserted) {
+                work.push_back(successor);
+            } else if (slot->second.has_value() &&
+                       (!out.has_value() || *out != *slot->second)) {
+                slot->second = std::nullopt;
+                work.push_back(successor);
+            }
+        };
+        const uintptr_t next_address = address + decoded.instruction.length;
+        const uintptr_t branch_target = GetRelativeTarget(decoded);
+        if (decoded.instruction.meta.category == ZYDIS_CATEGORY_COND_BR) {
+            propagate(next_address);
+            propagate(branch_target);
+        } else if (decoded.instruction.meta.category == ZYDIS_CATEGORY_UNCOND_BR) {
+            propagate(branch_target);
+        } else if (!IsControlFlowTerminator(decoded.instruction)) {
+            propagate(next_address);
+        }
+    }
+
+    for (auto& [address, decoded] : function.instructions) {
+        const auto state = distance_in.find(address);
+        if (state == distance_in.end() || !state->second.has_value()) {
+            continue;
+        }
+        const s64 distance = *state->second;
+        bool has_memory_operand = false;
+        bool frame_only = true;
+        for (u8 index = 0; index < decoded.instruction.operand_count; ++index) {
+            const auto& operand = decoded.operands[index];
+            if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY) {
+                continue;
+            }
+            has_memory_operand = true;
+            if (!IsFramePointerRegister(operand.mem.base) ||
+                IsStackPointerRegister(operand.mem.index)) {
+                frame_only = false;
+                continue;
+            }
+            const s64 displacement = operand.mem.disp.size != 0 ? operand.mem.disp.value : 0;
+            const s64 access_start = distance + displacement;
+            if (access_start >= 0) {
+                continue;
+            }
+            function.uses_red_zone = true;
+            if (decoded.instruction.mnemonic == ZYDIS_MNEMONIC_LEA ||
+                access_start < -static_cast<s64>(GuestRedZoneSize)) {
+                decoded.has_unmodeled_red_zone_operand = true;
+                function.requires_conservative_red_zone_tracking = true;
+                continue;
+            }
+            decoded.has_red_zone_operand = true;
+            const s64 access_size = std::max<s64>(operand.size / 8, 1);
+            const s64 range_end = std::min(access_start + access_size, static_cast<s64>(0));
+            for (s64 offset = access_start; offset < range_end; ++offset) {
+                const size_t bit = static_cast<size_t>(offset + static_cast<s64>(GuestRedZoneSize));
+                if ((operand.actions & ZYDIS_OPERAND_ACTION_MASK_READ) != 0) {
+                    decoded.red_zone_use.set(bit);
+                }
+                if ((operand.actions & ZYDIS_OPERAND_ACTION_WRITE) != 0) {
+                    decoded.red_zone_def.set(bit);
+                }
+            }
+        }
+        // A frame access is a stack access: it cannot fault, so it needs no protection itself.
+        if (has_memory_operand && frame_only && decoded.instruction.mnemonic != ZYDIS_MNEMONIC_LEA) {
+            decoded.accesses_memory = false;
+        }
+    }
+}
+
 DecodedFunction DecodeFunction(uintptr_t function_start, uintptr_t function_end,
                                uintptr_t segment_start, uintptr_t segment_end) {
     DecodedFunction function;
@@ -1601,6 +1727,7 @@ DecodedFunction DecodeFunction(uintptr_t function_start, uintptr_t function_end,
             break;
         }
     }
+    ModelFramePointerRedZone(function, function_start);
     function.has_indirect_branch = indirect_branches.size() != resolved_indirect_branches.size();
     return function;
 }
