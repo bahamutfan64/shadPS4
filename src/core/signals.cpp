@@ -10,11 +10,68 @@
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/threads/exception.h"
 #include "core/libraries/kernel/threads/pthread.h"
+#include "core/linker.h"
+#include "core/module.h"
 #include "core/signals.h"
 #include "emulator.h"
 
 #ifdef _WIN32
 #include <windows.h>
+
+// Reports an exception the emulator cannot handle: the faulting access, the registers, and the
+// stack slots that point into a guest module. The game has no symbols, so this is what there is
+// to work from when it dies.
+static std::string DescribeGuestAddress(u64 addr) {
+    auto* linker = Common::Singleton<Core::Linker>::Instance();
+    for (s32 i = 0;; ++i) {
+        const Core::Module* module = linker->GetModule(i);
+        if (module == nullptr) {
+            break;
+        }
+        const VAddr base = module->GetBaseAddress();
+        if (addr >= base && addr < base + module->aligned_base_size) {
+            return fmt::format("{}+{:#x}", module->file.filename().string(), addr - base);
+        }
+    }
+    return {};
+}
+
+static void ReportUnhandledException(EXCEPTION_POINTERS* pExp) {
+    const EXCEPTION_RECORD* rec = pExp->ExceptionRecord;
+    const CONTEXT* ctx = pExp->ContextRecord;
+    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2) {
+        const char* kind = rec->ExceptionInformation[0] == 1   ? "write to"
+                           : rec->ExceptionInformation[0] == 8 ? "execute at"
+                                                               : "read from";
+        LOG_CRITICAL(Debug, "  access violation: {} address {:#x}", kind,
+                     static_cast<u64>(rec->ExceptionInformation[1]));
+    }
+    LOG_CRITICAL(Debug, "  rip {:#x} {}", ctx->Rip, DescribeGuestAddress(ctx->Rip));
+    LOG_CRITICAL(Debug, "  rax {:#x} rbx {:#x} rcx {:#x} rdx {:#x}", ctx->Rax, ctx->Rbx, ctx->Rcx,
+                 ctx->Rdx);
+    LOG_CRITICAL(Debug, "  rsi {:#x} rdi {:#x} rbp {:#x} rsp {:#x}", ctx->Rsi, ctx->Rdi, ctx->Rbp,
+                 ctx->Rsp);
+    LOG_CRITICAL(Debug, "  r8  {:#x} r9  {:#x} r10 {:#x} r11 {:#x}", ctx->R8, ctx->R9, ctx->R10,
+                 ctx->R11);
+    LOG_CRITICAL(Debug, "  r12 {:#x} r13 {:#x} r14 {:#x} r15 {:#x}", ctx->R12, ctx->R13, ctx->R14,
+                 ctx->R15);
+    std::string trace;
+    const u64 sp = ctx->Rsp & ~7ULL;
+    for (u64 i = 0; i < 2048; ++i) {
+        u64 value = 0;
+        SIZE_T read = 0;
+        if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(sp + i * 8), &value,
+                               sizeof(value), &read) ||
+            read != sizeof(value)) {
+            break;
+        }
+        const std::string where = DescribeGuestAddress(value);
+        if (!where.empty()) {
+            trace += fmt::format(" [rsp+{:#x}]={}", i * 8, where);
+        }
+    }
+    LOG_CRITICAL(Debug, "  stack slots pointing into guest modules:{}", trace.empty() ? " none" : trace);
+}
 static constexpr DWORD MS_VC_EXCEPTION = 0x406D1388;
 #else
 #include <csignal>
@@ -143,6 +200,7 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
         use_static_windows_guest_red_zone_protection ? static_protection_exception : true;
     if (report_unhandled) {
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
+        ReportUnhandledException(pExp);
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }
 
