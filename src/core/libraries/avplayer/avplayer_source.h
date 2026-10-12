@@ -226,6 +226,15 @@ private:
     AvPlayerQueue<Frame> m_video_frames;
 
     std::optional<Frame> m_current_video_frame;
+
+    // Diagnostic: how many GetVideoData calls returned a new frame, and why the rest did not.
+    struct VideoPollStats {
+        std::chrono::high_resolution_clock::time_point since{};
+        u32 delivered = 0;
+        u32 not_due = 0;
+        u32 queue_empty = 0;
+    } m_video_poll_stats{};
+    void ReportVideoPoll(u32 VideoPollStats::* counter);
     std::optional<Frame> m_current_audio_frame;
 
     std::optional<s32> m_video_stream_index{};

@@ -4,6 +4,7 @@
 #include "common/alignment.h"
 #include "common/singleton.h"
 #include "common/thread.h"
+#include "core/emulator_settings.h"
 #include "core/file_sys/fs.h"
 #include "core/libraries/avplayer/avplayer_error.h"
 #include "core/libraries/avplayer/avplayer_file_streamer.h"
@@ -12,6 +13,7 @@
 #include "core/libraries/videodec/video_utils.h"
 #include "core/memory.h"
 
+#include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
 
 extern "C" {
@@ -383,12 +385,48 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfo& video_info) {
     return true;
 }
 
+/// A console refreshes 60000/1001 times a second, and a 59.94 fps video shows one frame per
+/// refresh. The emulator's vblank runs at exactly 60 Hz, so against a wall clock one game frame
+/// in every 1001 finds no new video frame and repeats the old one (about every 17 seconds).
+/// Running the clock of a video-only source 1001/1000 faster keeps the two in step; a source
+/// with audio follows its audio timestamps and is left alone. SHADPS4_AVPLAYER_WALL_CLOCK=1
+/// restores the wall clock.
+static bool UseConsoleVideoClock() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("SHADPS4_AVPLAYER_WALL_CLOCK");
+        const bool wall_clock = value != nullptr && value[0] == '1';
+        return !wall_clock && EmulatorSettings.GetVblankFrequency() == 60;
+    }();
+    return enabled;
+}
+
+void AvPlayerSource::ReportVideoPoll(u32 VideoPollStats::* counter) {
+    using namespace std::chrono;
+    auto& stats = m_video_poll_stats;
+    const auto now = high_resolution_clock::now();
+    if (stats.since == high_resolution_clock::time_point{}) {
+        stats.since = now;
+    }
+    ++(stats.*counter);
+    if (now - stats.since >= seconds(5)) {
+        LOG_INFO(Lib_AvPlayer,
+                 "Video polls in {} ms: {} new frames, {} repeats (frame not due), {} repeats "
+                 "(decoder behind), {} clock",
+                 duration_cast<milliseconds>(now - stats.since).count(), stats.delivered,
+                 stats.not_due, stats.queue_empty,
+                 m_audio_stream_index ? "audio" : UseConsoleVideoClock() ? "console" : "wall");
+        stats = {};
+        stats.since = now;
+    }
+}
+
 bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
     if (!IsActive() || m_is_paused) {
         return false;
     }
 
     if (m_video_frames.Size() == 0) {
+        ReportVideoPoll(&VideoPollStats::queue_empty);
         return false;
     }
 
@@ -396,9 +434,11 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
     const auto& new_frame = m_video_frames.Front();
     if (m_state.GetSyncMode() == AvPlayerAvSyncMode::Default) {
         if (new_frame.info.timestamp > current_time) {
+            ReportVideoPoll(&VideoPollStats::not_due);
             return false;
         }
     }
+    ReportVideoPoll(&VideoPollStats::delivered);
 
     if (m_current_video_frame.has_value()) {
         m_video_buffers.Push(std::move(m_current_video_frame->buffer));
@@ -503,8 +543,12 @@ u64 AvPlayerSource::CurrentTime() {
         return m_last_audio_ts.value_or(0) + elapsed;
     }
 
-    const auto elapsed =
-        duration_cast<milliseconds>(now - m_start_time.value() - m_pause_duration).count();
+    auto elapsed =
+        duration_cast<microseconds>(now - m_start_time.value() - m_pause_duration).count();
+    if (UseConsoleVideoClock()) {
+        elapsed = elapsed * 1001 / 1000;
+    }
+    elapsed /= 1000;
     if (elapsed <= 0) {
         return 0;
     }
