@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <deque>
+#include <span>
 #include <boost/container/small_vector.hpp>
 
 #include "common/interval_set.h"
@@ -13,6 +14,7 @@
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
+#include "video_core/texture_cache/types.h"
 
 namespace AmdGpu {
 struct Liverpool;
@@ -130,9 +132,10 @@ private:
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
 
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
-                           bool is_texel_buffer);
+                           bool is_texel_buffer, std::span<const ImageId> image_ids = {});
 
-    bool SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size);
+    bool SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size,
+                                    std::span<const ImageId> image_ids = {});
 
     const Vulkan::Instance& instance;
     Vulkan::Scheduler& scheduler;
