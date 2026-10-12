@@ -442,11 +442,14 @@ struct SignalImpl : public PageManager::Impl {
         if (Common::IsWriteError(context)) {
             Common::FrameProbe::Scope probe{Common::FrameProbe::sec_write_fault};
             const bool handled = rasterizer->InvalidateMemory(addr, size, is_gpu_thread);
-            // Experimental: a game filling a buffer faults once per 4 KB page. Release the
-            // rest of the surrounding block as well so the following pages do not fault.
+            // A game filling a buffer faults once per 4 KB page. Release the rest of the
+            // surrounding 64 KB block as well so the following pages do not fault. Measured on
+            // Tearaway Unfolded: write faults 41.8k/s -> 5.7k/s, handler time 383 -> 65 ms/s,
+            // re-uploaded data 162 -> 349 MB/s, slow stretches 52-58 fps -> 60 fps.
+            // SHADPS4_FAULT_BLOCK_KB overrides the size; 4 turns it off.
             static const u64 block_size = [] {
                 const char* v = std::getenv("SHADPS4_FAULT_BLOCK_KB");
-                const u64 kb = v != nullptr ? std::strtoull(v, nullptr, 10) : 0;
+                const u64 kb = v != nullptr && v[0] != 0 ? std::strtoull(v, nullptr, 10) : 64;
                 return kb >= 8 && kb <= 1024 && std::has_single_bit(kb) ? kb * 1024 : 0;
             }();
             if (handled && block_size != 0) {
