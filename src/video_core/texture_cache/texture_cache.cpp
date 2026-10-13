@@ -630,6 +630,41 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                     cache_image.binding.needs_rebind = 1u;
                     if (merged_image_id) {
                         GetImage(merged_image_id).binding.is_target = 1u;
+                        // The sub-image holds what the guest just drew into this mip and slice.
+                        // Freeing it without copying lost that: Unreal Engine reduces its
+                        // sky-light cube face by face and mip by mip this way, and the result
+                        // (the 9x1 irradiance table) came out empty in Matterfall.
+                        // SHADPS4_KEEP_TARGET_MIP=0 restores the old behaviour.
+                        static const bool keep = [] {
+                            const char* const value = std::getenv("SHADPS4_KEEP_TARGET_MIP");
+                            return value == nullptr || value[0] != '0';
+                        }();
+                        static std::atomic<u32> reported{};
+                        if (reported.fetch_add(1) < 30) {
+                            LOG_INFO(Render_Vulkan,
+                                     "Bound target {}x{} at {:#x} is mip {} slice {} of {}x{} "
+                                     "layers {} levels {} at {:#x}: {}",
+                                     cache_image.info.size.width, cache_image.info.size.height,
+                                     cache_image.info.guest_address, mip, slice,
+                                     image_info.size.width, image_info.size.height,
+                                     image_info.resources.layers, image_info.resources.levels,
+                                     image_info.guest_address, keep ? "copied" : "dropped");
+                        }
+                        auto& merged_image = slot_images[merged_image_id];
+                        // CopyMip asserts on these; a part that does not line up is dropped.
+                        const u32 src_dim = cache_image.info.props.is_block ? 2 : 0;
+                        const u32 dst_dim = merged_image.info.props.is_block ? 2 : 0;
+                        const bool lines_up =
+                            std::max(merged_image.info.size.width >> (mip + dst_dim), 1u) ==
+                                (cache_image.info.size.width >> src_dim) &&
+                            std::max(merged_image.info.size.height >> (mip + dst_dim), 1u) ==
+                                (cache_image.info.size.height >> src_dim) &&
+                            std::max<u32>(merged_image.info.mips_layout[mip].pitch >> dst_dim,
+                                          1u) == (cache_image.info.pitch >> src_dim);
+                        if (keep && lines_up &&
+                            True(cache_image.flags & ImageFlagBits::GpuModified)) {
+                            runtime.CopyMip(&cache_image, &merged_image, mip, slice);
+                        }
                     }
 
                     FreeImage(cache_image_id);
