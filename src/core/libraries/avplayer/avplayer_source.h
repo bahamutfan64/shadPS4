@@ -239,6 +239,11 @@ private:
         std::chrono::high_resolution_clock::time_point last_delivery{};
     } m_video_poll_stats{};
     void ReportVideoPoll(u32 VideoPollStats::* counter);
+    // Poll phase tracking for the console clock (see TrackVideoPollPhase).
+    std::array<u32, 64> m_video_poll_phases{};
+    u32 m_video_poll_phase_count = 0;
+    std::atomic<s64> m_video_clock_shift_us{0};
+    void TrackVideoPollPhase();
     std::optional<Frame> m_current_audio_frame;
 
     std::optional<s32> m_video_stream_index{};

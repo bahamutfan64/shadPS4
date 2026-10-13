@@ -330,6 +330,8 @@ bool AvPlayerSource::Start() {
     m_video_decoder_thread.Run([this](std::stop_token stop) { this->VideoDecoderThread(stop); });
     m_audio_decoder_thread.Run([this](std::stop_token stop) { this->AudioDecoderThread(stop); });
     m_start_time = std::chrono::high_resolution_clock::now();
+    m_video_clock_shift_us = 0;
+    m_video_poll_phase_count = 0;
     return true;
 }
 
@@ -441,6 +443,56 @@ void AvPlayerSource::ReportVideoPoll(u32 VideoPollStats::* counter) {
     }
 }
 
+/// A game polls for video at fixed points of its 60 Hz frame, and on the console clock a new
+/// video frame also becomes due every 1/60 s. If a poll happens to sit right where frames become
+/// due, timing jitter decides each time whether it sees the new frame: one game frame repeats the
+/// old picture and the next one skips a picture. This looks at where the last 64 polls fell within
+/// the frame period and moves the clock (by under half a period) so that frames become due in the
+/// middle of the longest stretch without polls.
+void AvPlayerSource::TrackVideoPollPhase() {
+    using namespace std::chrono;
+    static constexpr s64 Period = 1001000 / 60; // 1/60 s on the scaled clock, in microseconds
+    static constexpr s64 DueOffset = 500;       // timestamps are whole milliseconds, rounded down
+    if (m_audio_stream_index || !UseConsoleVideoClock() || !m_start_time.has_value()) {
+        return;
+    }
+    const s64 elapsed = duration_cast<microseconds>(high_resolution_clock::now() -
+                                                    m_start_time.value() - m_pause_duration)
+                                .count() *
+                            1001 / 1000 +
+                        m_video_clock_shift_us.load();
+    m_video_poll_phases[m_video_poll_phase_count++] = u32(((elapsed % Period) + Period) % Period);
+    if (m_video_poll_phase_count < m_video_poll_phases.size()) {
+        return;
+    }
+    m_video_poll_phase_count = 0;
+    auto phases = m_video_poll_phases;
+    std::ranges::sort(phases);
+    s64 gap = s64(phases.front()) + Period - s64(phases.back());
+    s64 gap_start = phases.back();
+    for (size_t i = 1; i < phases.size(); ++i) {
+        const s64 between = s64(phases[i]) - s64(phases[i - 1]);
+        if (between > gap) {
+            gap = between;
+            gap_start = phases[i - 1];
+        }
+    }
+    if (gap < 6000) {
+        return; // polls are spread over the whole period; no position is better than another
+    }
+    // Shift that puts the middle of the gap just before the point where frames become due.
+    s64 shift = (((Period - DueOffset - (gap_start + gap / 2)) % Period) + Period) % Period;
+    if (shift > Period / 2) {
+        shift -= Period;
+    }
+    if (shift > -2000 && shift < 2000) {
+        return;
+    }
+    m_video_clock_shift_us += shift;
+    LOG_INFO(Lib_AvPlayer, "Video clock moved by {} us (longest stretch without polls: {} us)",
+             shift, gap);
+}
+
 bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
     if (!IsActive() || m_is_paused) {
         return false;
@@ -451,6 +503,7 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
         return false;
     }
 
+    TrackVideoPollPhase();
     const auto current_time = CurrentTime();
     const auto& new_frame = m_video_frames.Front();
     if (m_state.GetSyncMode() == AvPlayerAvSyncMode::Default) {
@@ -567,7 +620,7 @@ u64 AvPlayerSource::CurrentTime() {
     auto elapsed =
         duration_cast<microseconds>(now - m_start_time.value() - m_pause_duration).count();
     if (UseConsoleVideoClock()) {
-        elapsed = elapsed * 1001 / 1000;
+        elapsed = elapsed * 1001 / 1000 + m_video_clock_shift_us.load();
     }
     elapsed /= 1000;
     if (elapsed <= 0) {
