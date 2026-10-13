@@ -11,7 +11,6 @@
 #include "core/libraries/avplayer/avplayer_handle_streamer.h"
 #include "core/libraries/avplayer/avplayer_source.h"
 #include "core/libraries/videodec/video_utils.h"
-#include "core/libraries/videoout/video_out.h"
 #include "core/memory.h"
 
 #include <algorithm>
@@ -30,15 +29,9 @@ extern "C" {
 
 #include "common/support/avdec.h"
 
-namespace Libraries::VideoOut {
-// Defined in video_out.cpp; not declared in its header.
-s32 PS4_SYSV_ABI sceVideoOutGetVblankStatus(int handle, SceVideoOutVblankStatus* status);
-} // namespace Libraries::VideoOut
-
 namespace Libraries::AvPlayer {
 
 static bool UseConsoleVideoClock();
-static std::optional<u64> CurrentVblank();
 
 static AvPlayerStreamType CodecTypeToStreamType(AVMediaType codec_type) {
     switch (codec_type) {
@@ -337,8 +330,6 @@ bool AvPlayerSource::Start() {
     m_video_decoder_thread.Run([this](std::stop_token stop) { this->VideoDecoderThread(stop); });
     m_audio_decoder_thread.Run([this](std::stop_token stop) { this->AudioDecoderThread(stop); });
     m_start_time = std::chrono::high_resolution_clock::now();
-    m_start_vblank = !m_audio_stream_index && UseConsoleVideoClock() ? CurrentVblank()
-                                                                    : std::nullopt;
     return true;
 }
 
@@ -371,7 +362,6 @@ bool AvPlayerSource::Stop() {
     m_last_audio_ts.reset();
     m_last_data_time.reset();
     m_start_time.reset();
-    m_start_vblank.reset();
     m_pause_time = {};
     m_pause_duration = {};
 
@@ -420,21 +410,6 @@ static bool UseConsoleVideoClock() {
     return enabled;
 }
 
-/// Refresh count of the main video output, or nothing when it is not open.
-static std::optional<u64> CurrentVblank() {
-    static std::atomic<bool> unavailable{false};
-    if (unavailable.load(std::memory_order_relaxed)) {
-        return std::nullopt;
-    }
-    Libraries::VideoOut::SceVideoOutVblankStatus status{};
-    if (Libraries::VideoOut::sceVideoOutGetVblankStatus(1, &status) != 0) {
-        // Asking again would log an error on every request.
-        unavailable.store(true, std::memory_order_relaxed);
-        return std::nullopt;
-    }
-    return status.count;
-}
-
 void AvPlayerSource::ReportVideoPoll(u32 VideoPollStats::* counter) {
     using namespace std::chrono;
     auto& stats = m_video_poll_stats;
@@ -443,15 +418,26 @@ void AvPlayerSource::ReportVideoPoll(u32 VideoPollStats::* counter) {
         stats.since = now;
     }
     ++(stats.*counter);
+    if (counter == &VideoPollStats::delivered) {
+        if (stats.last_delivery != high_resolution_clock::time_point{}) {
+            const auto ms = duration_cast<microseconds>(now - stats.last_delivery).count() / 1000.0;
+            ++stats.interval[ms < 12.0 ? 0 : ms < 21.0 ? 1 : ms < 30.0 ? 2 : 3];
+        }
+        stats.last_delivery = now;
+    }
     if (now - stats.since >= seconds(5)) {
         LOG_INFO(Lib_AvPlayer,
                  "Video polls in {} ms: {} new frames, {} repeats (frame not due), {} repeats "
-                 "(decoder behind), {} clock",
+                 "(decoder behind), {} clock | ms between new frames: under 12: {}, 12-21: {}, "
+                 "21-30: {}, 30 or more: {}",
                  duration_cast<milliseconds>(now - stats.since).count(), stats.delivered,
                  stats.not_due, stats.queue_empty,
-                 m_audio_stream_index ? "audio" : UseConsoleVideoClock() ? "console" : "wall");
+                 m_audio_stream_index ? "audio" : UseConsoleVideoClock() ? "console" : "wall",
+                 stats.interval[0], stats.interval[1], stats.interval[2], stats.interval[3]);
+        const auto last_delivery = stats.last_delivery;
         stats = {};
         stats.since = now;
+        stats.last_delivery = last_delivery;
     }
 }
 
@@ -582,18 +568,6 @@ u64 AvPlayerSource::CurrentTime() {
         duration_cast<microseconds>(now - m_start_time.value() - m_pause_duration).count();
     if (UseConsoleVideoClock()) {
         elapsed = elapsed * 1001 / 1000;
-        // The guest asks for a frame about twice per displayed frame, at times that jitter by
-        // a millisecond or so. Against a continuous clock a frame whose due time falls near
-        // one of those requests is shown either now or a frame late, at random. Counting
-        // display refreshes instead gives every refresh exactly one new frame of a 59.94 fps
-        // video; the half refresh added keeps the due time away from the count's edge.
-        if (m_start_vblank.has_value() && !m_is_paused.load()) {
-            if (const auto vblank = CurrentVblank(); vblank && *vblank >= *m_start_vblank) {
-                const s64 refresh_us = 1001000 / 60;
-                elapsed = s64(*vblank - *m_start_vblank) * refresh_us + refresh_us / 2 -
-                          duration_cast<microseconds>(m_pause_duration).count();
-            }
-        }
     }
     elapsed /= 1000;
     if (elapsed <= 0) {

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -233,6 +234,9 @@ private:
         u32 delivered = 0;
         u32 not_due = 0;
         u32 queue_empty = 0;
+        // Time between successive new frames: under 12 ms, 12-21, 21-30, 30 or more.
+        std::array<u32, 4> interval{};
+        std::chrono::high_resolution_clock::time_point last_delivery{};
     } m_video_poll_stats{};
     void ReportVideoPoll(u32 VideoPollStats::* counter);
     std::optional<Frame> m_current_audio_frame;
@@ -262,8 +266,6 @@ private:
     std::optional<u64> m_last_audio_ts{};
     std::optional<std::chrono::high_resolution_clock::time_point> m_last_data_time{};
     std::optional<std::chrono::high_resolution_clock::time_point> m_start_time{};
-    /// Display refresh count when playback started; set when the refresh-count clock is in use.
-    std::optional<u64> m_start_vblank{};
     std::chrono::high_resolution_clock::time_point m_pause_time{};
     std::chrono::high_resolution_clock::duration m_pause_duration{};
 };
