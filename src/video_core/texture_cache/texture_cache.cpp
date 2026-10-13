@@ -4,8 +4,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <vector>
 #include <fmt/ranges.h>
 #include <xxhash.h>
@@ -108,40 +110,106 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
         return;
     }
     if (IsSmallTiledReadback(image.info)) {
+        static const auto env_number = [](const char* name, u32 fallback) {
+            const char* const value = std::getenv(name);
+            return value != nullptr && value[0] != 0 ? u32(std::strtoul(value, nullptr, 10))
+                                                     : fallback;
+        };
+        static const u32 mode = env_number("SHADPS4_READBACK_SMALL", 2);
+        static const u32 only_width = env_number("SHADPS4_READBACK_SMALL_W", 0);
         const auto& info = image.info;
         const auto& mip_info = info.mips_layout[0];
-        const auto tiled =
-            runtime.GetStagingPool().Request(info.guest_size, MemoryType::HostCached, 256);
-        vk::BufferImageCopy copy{
-            .bufferOffset = mip_info.offset,
+        const u32 bytes_per_pixel = info.num_bits / 8;
+        const u32 linear_size = u32(mip_info.pitch) * info.size.height * bytes_per_pixel;
+        const vk::ImageSubresourceLayers layers{
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
+        const auto linear = runtime.GetStagingPool().Request(linear_size, MemoryType::HostCached, 256);
+        const vk::BufferImageCopy linear_copy{
+            .bufferOffset = linear.offset,
             .bufferRowLength = mip_info.pitch,
-            .bufferImageHeight = mip_info.height,
-            .imageSubresource{
-                .aspectMask = vk::ImageAspectFlagBits::eColor,
-                .mipLevel = 0,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
+            .bufferImageHeight = info.size.height,
+            .imageSubresource = layers,
             .imageOffset = {0, 0, 0},
             .imageExtent = {info.size.width, info.size.height, 1},
         };
-        tile_manager.TileImage(image, std::span{&copy, 1}, tiled.buffer, tiled.offset);
+        runtime.DownloadImage(&image, linear.buffer, std::span{&linear_copy, 1});
+        const auto tiled =
+            runtime.GetStagingPool().Request(info.guest_size, MemoryType::HostCached, 256);
+        vk::BufferImageCopy tiled_copy{
+            .bufferOffset = mip_info.offset,
+            .bufferRowLength = mip_info.pitch,
+            .bufferImageHeight = mip_info.height,
+            .imageSubresource = layers,
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {info.size.width, info.size.height, 1},
+        };
+        tile_manager.TileImage(image, std::span{&tiled_copy, 1}, tiled.buffer, tiled.offset);
         scheduler.Finish();
+        linear.Invalidate();
         tiled.Invalidate();
+        const bool write = mode != 0 && (only_width == 0 || only_width == info.size.width);
         static std::atomic<u32> reported{};
-        if (reported.fetch_add(1) < 40) {
-            std::array<u16, 16> first{};
-            std::memcpy(first.data(), tiled.mapped,
-                        std::min<u64>(sizeof(first), info.guest_size));
+        if (reported.fetch_add(1) < 60) {
+            std::string linear_words;
+            const u32 words = std::min<u32>(info.size.width * bytes_per_pixel / 2, 36);
+            for (u32 i = 0; i < words; ++i) {
+                u16 word;
+                std::memcpy(&word, linear.mapped + i * 2, 2);
+                linear_words += fmt::format("{:04x} ", word);
+            }
+            std::string tiled_runs;
+            u32 nonzero = 0;
+            for (u64 i = 0; i + bytes_per_pixel <= info.guest_size; i += bytes_per_pixel) {
+                bool any = false;
+                for (u32 k = 0; k < bytes_per_pixel; ++k) {
+                    any |= tiled.mapped[i + k] != 0;
+                }
+                if (any && nonzero++ < 12) {
+                    u16 word;
+                    std::memcpy(&word, tiled.mapped + i, 2);
+                    tiled_runs += fmt::format("{:#x}:{:04x} ", i, word);
+                }
+            }
+            std::string guest_words;
+            for (u32 i = 0; i < 8; ++i) {
+                u16 word;
+                std::memcpy(&word, std::bit_cast<const u8*>(info.guest_address) + i * 2, 2);
+                guest_words += fmt::format("{:04x} ", word);
+            }
             LOG_INFO(Render_Vulkan,
-                     "Reading back small tiled target {}x{} {} at {:#x} (pitch {}, tile mode {}, "
-                     "{} bytes), first words: {:04x}",
+                     "Small tiled target {}x{} {} at {:#x} pitch {} mip pitch {} height {} tile "
+                     "mode {} size {} | write mode {} {} | guest had: {}| linear row 0: {}| tiler "
+                     "non-zero pixels {}: {}",
                      info.size.width, info.size.height, vk::to_string(info.pixel_format),
-                     info.guest_address, info.pitch, static_cast<u32>(info.tile_mode),
-                     info.guest_size, fmt::join(first, " "));
+                     info.guest_address, info.pitch, mip_info.pitch, mip_info.height,
+                     static_cast<u32>(info.tile_mode), info.guest_size, mode,
+                     write ? "written" : "not written", guest_words, linear_words, nonzero,
+                     tiled_runs);
         }
-        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(info.guest_address),
-                                                  tiled.mapped, info.guest_size);
+        if (write && mode == 1) {
+            Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(info.guest_address),
+                                                      tiled.mapped, info.guest_size);
+        } else if (write) {
+            // 8x8 micro tiles in row order, each tile stored row by row.
+            const u32 tiles_x = (info.size.width + 7) / 8;
+            for (u32 y = 0; y < info.size.height; ++y) {
+                for (u32 x = 0; x < info.size.width; x += 8) {
+                    const u64 element = u64((y / 8) * tiles_x + x / 8) * 64 + (y % 8) * 8;
+                    const u64 run = u64(std::min<u32>(8, info.size.width - x)) * bytes_per_pixel;
+                    const u64 offset = element * bytes_per_pixel;
+                    if (offset + run > info.guest_size) {
+                        continue;
+                    }
+                    Core::Memory::Instance()->TryWriteBacking(
+                        std::bit_cast<u8*>(info.guest_address + offset),
+                        linear.mapped + (u64(y) * mip_info.pitch + x) * bytes_per_pixel, run);
+                }
+            }
+        }
         return;
     }
     const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
