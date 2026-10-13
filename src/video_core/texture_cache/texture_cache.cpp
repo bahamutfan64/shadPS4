@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <atomic>
 #include <limits>
 #include <thread>
@@ -664,6 +665,21 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     // Create and register a new image
     if (!image_id) {
         image_id = slot_images.Insert(instance, runtime, slot_image_views, info);
+        {
+            // Experiment (SHADPS4_ZERO_NEW_IMAGES=1): a new image starts with whatever the host
+            // GPU memory held. Matterfall's sky irradiance table comes out saturated; this
+            // tests whether an image in that chain is read before the guest draws to it.
+            static const bool zero_new_images = [] {
+                const char* const value = std::getenv("SHADPS4_ZERO_NEW_IMAGES");
+                return value != nullptr && value[0] == '1';
+            }();
+            Image& new_image = slot_images[image_id];
+            if (zero_new_images && new_image.info.pixel_format != vk::Format::eUndefined &&
+                !new_image.info.props.is_depth && !new_image.info.props.is_block &&
+                new_image.info.num_samples == 1) {
+                runtime.ZeroNewImage(&new_image);
+            }
+        }
         RegisterImage(image_id);
     }
 
