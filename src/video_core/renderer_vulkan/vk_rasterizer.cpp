@@ -6,9 +6,6 @@
 #include <atomic>
 #include <bit>
 #include <cstring>
-#include <set>
-#include <string>
-#include <tuple>
 #include <unordered_set>
 
 #include "common/debug.h"
@@ -654,45 +651,6 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     // Ensure shader only has 2 bound buffers
     const auto& cs_pgm = liverpool->GetCsRegs();
     const auto& info = pipeline->GetStage(Shader::SwStage::Compute);
-    {
-        // Diagnostic: every distinct compute dispatch that has a formatted (raw) buffer, with
-        // the images behind each buffer. Finds guest copies of drawn images into plain buffers.
-        bool any_formatted = false;
-        for (const auto& desc : info.buffers) {
-            any_formatted |=
-                desc.is_formatted && desc.buffer_type == Shader::BufferType::Guest;
-        }
-        if (any_formatted) {
-            static std::set<std::string> seen;
-            std::string text = fmt::format("cs {:#x} dim {}x{}x{} threads {} images {} |",
-                                           info.pgm_hash, cs_pgm.dim_x, cs_pgm.dim_y,
-                                           cs_pgm.dim_z, cs_pgm.num_thread_x.full,
-                                           info.images.size());
-            for (const auto& desc : info.buffers) {
-                // Only guest buffers have a descriptor to read; the emulator's own buffer
-                // types (flat buffer, page table, fault buffer, ...) do not.
-                if (desc.buffer_type != Shader::BufferType::Guest) {
-                    continue;
-                }
-                const AmdGpu::Buffer buf = desc.GetSharp(info);
-                if (buf.base_address == 0 || buf.GetSize() == 0 || buf.GetSize() > 256_MB) {
-                    continue;
-                }
-                text += fmt::format(" buf {:#x}+{:#x} {}{}{} ->{};", buf.base_address,
-                                    buf.GetSize(), desc.is_formatted ? "formatted " : "",
-                                    desc.is_written ? "written" : "read",
-                                    buffer_cache.IsRegionGpuModified(buf.base_address,
-                                                                     buf.GetSize())
-                                        ? " gpu-modified"
-                                        : "",
-                                    texture_cache.DescribeImagesInRange(buf.base_address,
-                                                                        buf.GetSize()));
-            }
-            if (seen.size() < 150 && seen.insert(text).second) {
-                LOG_INFO(Render_Vulkan, "Raw compute: {}", text);
-            }
-        }
-    }
     if (cs_pgm.num_thread_x.full != 64 || info.buffers.size() < 2 || info.buffers.size() > 3 ||
         !info.images.empty()) {
         return false;
@@ -1451,14 +1409,6 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
 }
 
 void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
-    {
-        // Diagnostic: distinct DMA copies and the images behind their source.
-        static std::set<std::tuple<VAddr, VAddr, u32>> seen;
-        if (!src_gds && !dst_gds && seen.size() < 150 && seen.emplace(dst, src, num_bytes).second) {
-            LOG_INFO(Render_Vulkan, "DMA copy {:#x} <- {:#x} size {:#x} | source images:{}", dst,
-                     src, num_bytes, texture_cache.DescribeImagesInRange(src, num_bytes));
-        }
-    }
     if (!dst_gds && !buffer_cache.IsRegionGpuModified(dst, num_bytes)) {
         if (!src_gds && !buffer_cache.IsRegionGpuModified(src, num_bytes) &&
             !texture_cache.FindImageFromRange(src, num_bytes)) {

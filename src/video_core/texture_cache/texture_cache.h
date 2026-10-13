@@ -5,7 +5,6 @@
 
 #include <atomic>
 #include <mutex>
-#include <string>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
@@ -132,9 +131,6 @@ public:
 
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
-
-    /// Diagnostic: one line per image that overlaps the range.
-    [[nodiscard]] std::string DescribeImagesInRange(VAddr address, size_t size);
 
     /// Retrieves an image view with the properties of the specified image id.
     [[nodiscard]] ImageView& FindTexture(ImageId image_id, const ImageDesc& desc);
