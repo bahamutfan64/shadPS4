@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstring>
 #include <limits>
+#include <vector>
 #include <xxhash.h>
 
 #include "common/assert.h"
@@ -71,6 +74,49 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 
 TextureCache::~TextureCache() = default;
 
+/// A render target the guest may read on the CPU. Linear images and images no wider than one
+/// 8x8 micro tile have always been read back as they are. A wider image of at most 8 rows is
+/// read back too and written in micro-tile order: Unreal Engine draws its sky-light table into
+/// a 9x1 half-float target and reads it on the CPU, and without the read-back it lights the
+/// whole level with whatever was in that memory (Matterfall: walls tinted by their direction).
+static bool IsSmallTiledReadback(const ImageInfo& info) {
+    return info.props.is_tiled && info.size.width > 8 && info.size.width <= 64 &&
+           info.size.height <= 8 && info.size.depth == 1 && info.resources.layers == 1 &&
+           info.resources.levels == 1 && info.num_samples == 1 && !info.props.is_block &&
+           !info.props.is_depth;
+}
+
+static bool IsReadbackCandidate(const ImageInfo& info) {
+    return !info.props.is_tiled || info.size.width <= 8 || IsSmallTiledReadback(info);
+}
+
+/// Writes a linear download of a small tiled image to guest memory in 8x8 micro-tile order.
+static void WriteBackMicroTiled(VAddr guest_address, u64 guest_size, const u8* linear, u32 pitch,
+                                u32 width, u32 height, u32 bytes_per_pixel) {
+    const u32 tiles_x = (width + 7) / 8;
+    std::vector<u8> tiled(u64(tiles_x) * ((height + 7) / 8) * 64 * bytes_per_pixel);
+    for (u32 y = 0; y < height; ++y) {
+        for (u32 x = 0; x < width; ++x) {
+            const u64 element = u64((y / 8) * tiles_x + x / 8) * 64 + (y % 8) * 8 + x % 8;
+            std::memcpy(tiled.data() + element * bytes_per_pixel,
+                        linear + (u64(y) * pitch + x) * bytes_per_pixel, bytes_per_pixel);
+        }
+    }
+    // Only the pixels are written; the padding of each tile keeps what the guest has there.
+    for (u32 y = 0; y < height; ++y) {
+        for (u32 x = 0; x < width; x += 8) {
+            const u64 element = u64((y / 8) * tiles_x + x / 8) * 64 + (y % 8) * 8;
+            const u64 run = std::min<u32>(8, width - x) * u64(bytes_per_pixel);
+            const u64 offset = element * bytes_per_pixel;
+            if (offset + run > guest_size) {
+                continue;
+            }
+            Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(guest_address + offset),
+                                                      tiled.data() + offset, run);
+        }
+    }
+}
+
 void TextureCache::ProcessDownloadImages() {
     std::unique_lock lk{download_images_mutex};
     for (const ImageId image_id : download_images) {
@@ -105,19 +151,40 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
         .imageExtent = {image.info.size.width, image.info.size.height, image.info.size.depth},
     };
     runtime.DownloadImage(&image, download.buffer, std::span{&image_download, 1});
+    const bool micro_tiled = IsSmallTiledReadback(image.info);
+    if (micro_tiled) {
+        static std::atomic<u32> reported{};
+        if (reported.fetch_add(1) < 40) {
+            LOG_INFO(Render_Vulkan,
+                     "Reading back small tiled target {}x{} {} at {:#x} (pitch {}, tile mode {})",
+                     image.info.size.width, image.info.size.height,
+                     vk::to_string(image.info.pixel_format), image.info.guest_address,
+                     image.info.pitch, static_cast<u32>(image.info.tile_mode));
+        }
+    }
+    const auto write_back = [micro_tiled, device_addr = image.info.guest_address,
+                             guest_size = u64(image.info.guest_size), pitch = image.info.pitch,
+                             width = image.info.size.width, height = image.info.size.height,
+                             bytes_per_pixel = image.info.num_bits / 8,
+                             download_size](const u8* mapped) {
+        if (micro_tiled) {
+            WriteBackMicroTiled(device_addr, guest_size, mapped, pitch, width, height,
+                                bytes_per_pixel);
+        } else {
+            Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr), mapped,
+                                                      download_size);
+        }
+    };
     if (sync) {
         scheduler.Finish();
         download.Invalidate();
-        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image.info.guest_address),
-                                                  download.mapped, download_size);
+        write_back(download.mapped);
     } else {
-        scheduler.DeferPriorityOperation(
-            [this, device_addr = image.info.guest_address, download, download_size] {
-                download.Invalidate();
-                Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr),
-                                                          download.mapped, download_size);
-                runtime.GetStagingPool().FreeDeferred(download);
-            });
+        scheduler.DeferPriorityOperation([this, download, write_back] {
+            download.Invalidate();
+            write_back(download.mapped);
+            runtime.GetStagingPool().FreeDeferred(download);
+        });
     }
 }
 
@@ -661,7 +728,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
-        if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
+        if (readback_linear_images && IsReadbackCandidate(image.info) &&
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
             download_images.emplace(image_id);
@@ -674,7 +741,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
-    if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
+    if (readback_linear_images && IsReadbackCandidate(image.info)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
     }
