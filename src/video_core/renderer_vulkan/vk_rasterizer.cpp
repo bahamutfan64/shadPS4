@@ -659,7 +659,8 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
         // the images behind each buffer. Finds guest copies of drawn images into plain buffers.
         bool any_formatted = false;
         for (const auto& desc : info.buffers) {
-            any_formatted |= desc.is_formatted;
+            any_formatted |=
+                desc.is_formatted && desc.buffer_type == Shader::BufferType::Guest;
         }
         if (any_formatted) {
             static std::set<std::string> seen;
@@ -668,7 +669,15 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
                                            cs_pgm.dim_z, cs_pgm.num_thread_x.full,
                                            info.images.size());
             for (const auto& desc : info.buffers) {
+                // Only guest buffers have a descriptor to read; the emulator's own buffer
+                // types (flat buffer, page table, fault buffer, ...) do not.
+                if (desc.buffer_type != Shader::BufferType::Guest) {
+                    continue;
+                }
                 const AmdGpu::Buffer buf = desc.GetSharp(info);
+                if (buf.base_address == 0 || buf.GetSize() == 0 || buf.GetSize() > 256_MB) {
+                    continue;
+                }
                 text += fmt::format(" buf {:#x}+{:#x} {}{}{} ->{};", buf.base_address,
                                     buf.GetSize(), desc.is_formatted ? "formatted " : "",
                                     desc.is_written ? "written" : "read",
