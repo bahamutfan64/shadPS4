@@ -93,6 +93,29 @@ static bool IsSmallMacroTiledTarget(const ImageInfo& info) {
            !info.props.is_depth && info.guest_address != 0;
 }
 
+/// Diagnostic trace of the sky irradiance passes: counts down while bindings are logged.
+static std::atomic<s32> sky_trace_left{0};
+static std::atomic<u64> sky_trace_first_address{0};
+
+static void TraceSkyBinding(const char* kind, const ImageInfo& want, const ImageViewInfo& view,
+                            const Image& image) {
+    if (sky_trace_left.load(std::memory_order_relaxed) <= 0) {
+        return;
+    }
+    sky_trace_left.fetch_sub(1, std::memory_order_relaxed);
+    LOG_INFO(Render_Vulkan,
+             "SKY {} want {}x{}x{} L{} M{} {} at {:#x} | view type {} fmt {} level {}+{} layer "
+             "{}+{} map {}{}{}{} | image {}x{} L{} M{} at {:#x}",
+             kind, want.size.width, want.size.height, want.size.depth, want.resources.layers,
+             want.resources.levels, vk::to_string(want.pixel_format), want.guest_address,
+             static_cast<u32>(view.type), vk::to_string(view.format), view.range.base.level,
+             view.range.extent.levels, view.range.base.layer, view.range.extent.layers,
+             static_cast<u32>(view.mapping.r), static_cast<u32>(view.mapping.g),
+             static_cast<u32>(view.mapping.b), static_cast<u32>(view.mapping.a),
+             image.info.size.width, image.info.size.height, image.info.resources.layers,
+             image.info.resources.levels, image.info.guest_address);
+}
+
 void TextureCache::ProcessDownloadImages() {
     download_thread_id.store(std::this_thread::get_id(), std::memory_order_relaxed);
     std::unique_lock lk{download_images_mutex};
@@ -733,6 +756,8 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
 
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
+    TraceSkyBinding(desc.type == BindingType::Storage ? "storage" : "texture", desc.info,
+                    desc.view_info, image);
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
@@ -748,6 +773,18 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
+    if (desc.info.size.width == 9 && desc.info.size.height == 1) {
+        u64 expected = 0;
+        if (!sky_trace_first_address.compare_exchange_strong(expected, desc.info.guest_address) &&
+            expected != desc.info.guest_address) {
+            // A second sky table: the level's. Trace the passes for the remaining coefficients.
+            static std::atomic<bool> started{false};
+            if (!started.exchange(true)) {
+                sky_trace_left.store(700, std::memory_order_relaxed);
+            }
+        }
+    }
+    TraceSkyBinding("TARGET ", desc.info, desc.view_info, image);
     if (desc.info.size.width == 9 && desc.info.size.height == 1) {
         // Diagnostic: how a 9x1 render target request is resolved.
         static std::atomic<u32> reported{};
