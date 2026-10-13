@@ -11,9 +11,12 @@
 #include "core/libraries/avplayer/avplayer_handle_streamer.h"
 #include "core/libraries/avplayer/avplayer_source.h"
 #include "core/libraries/videodec/video_utils.h"
+#include "core/libraries/videoout/video_out.h"
 #include "core/memory.h"
 
+#include <algorithm>
 #include <cstdlib>
+#include <thread>
 #include <magic_enum/magic_enum.hpp>
 
 extern "C" {
@@ -27,7 +30,15 @@ extern "C" {
 
 #include "common/support/avdec.h"
 
+namespace Libraries::VideoOut {
+// Defined in video_out.cpp; not declared in its header.
+s32 PS4_SYSV_ABI sceVideoOutGetVblankStatus(int handle, SceVideoOutVblankStatus* status);
+} // namespace Libraries::VideoOut
+
 namespace Libraries::AvPlayer {
+
+static bool UseConsoleVideoClock();
+static std::optional<u64> CurrentVblank();
 
 static AvPlayerStreamType CodecTypeToStreamType(AVMediaType codec_type) {
     switch (codec_type) {
@@ -276,6 +287,12 @@ bool AvPlayerSource::Start() {
                       m_video_stream_index.value());
             return false;
         }
+        // One thread is not enough headroom for 1080p60 at a high bit rate (Matterfall's intro is
+        // 38 Mbit/s): colour conversion and the copy to guest memory share that thread, and a
+        // slow frame leaves the guest without a new picture.
+        m_video_codec_context->thread_count =
+            std::clamp<int>(static_cast<int>(std::thread::hardware_concurrency()) / 2, 2, 6);
+        m_video_codec_context->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
         if (avcodec_open2(m_video_codec_context.get(), decoder, nullptr) < 0) {
             LOG_ERROR(Lib_AvPlayer, "Could not open avcodec for video stream {}.",
                       m_video_stream_index.value());
@@ -320,6 +337,8 @@ bool AvPlayerSource::Start() {
     m_video_decoder_thread.Run([this](std::stop_token stop) { this->VideoDecoderThread(stop); });
     m_audio_decoder_thread.Run([this](std::stop_token stop) { this->AudioDecoderThread(stop); });
     m_start_time = std::chrono::high_resolution_clock::now();
+    m_start_vblank = !m_audio_stream_index && UseConsoleVideoClock() ? CurrentVblank()
+                                                                    : std::nullopt;
     return true;
 }
 
@@ -352,6 +371,7 @@ bool AvPlayerSource::Stop() {
     m_last_audio_ts.reset();
     m_last_data_time.reset();
     m_start_time.reset();
+    m_start_vblank.reset();
     m_pause_time = {};
     m_pause_duration = {};
 
@@ -398,6 +418,21 @@ static bool UseConsoleVideoClock() {
         return !wall_clock && EmulatorSettings.GetVblankFrequency() == 60;
     }();
     return enabled;
+}
+
+/// Refresh count of the main video output, or nothing when it is not open.
+static std::optional<u64> CurrentVblank() {
+    static std::atomic<bool> unavailable{false};
+    if (unavailable.load(std::memory_order_relaxed)) {
+        return std::nullopt;
+    }
+    Libraries::VideoOut::SceVideoOutVblankStatus status{};
+    if (Libraries::VideoOut::sceVideoOutGetVblankStatus(1, &status) != 0) {
+        // Asking again would log an error on every request.
+        unavailable.store(true, std::memory_order_relaxed);
+        return std::nullopt;
+    }
+    return status.count;
 }
 
 void AvPlayerSource::ReportVideoPoll(u32 VideoPollStats::* counter) {
@@ -547,6 +582,18 @@ u64 AvPlayerSource::CurrentTime() {
         duration_cast<microseconds>(now - m_start_time.value() - m_pause_duration).count();
     if (UseConsoleVideoClock()) {
         elapsed = elapsed * 1001 / 1000;
+        // The guest asks for a frame about twice per displayed frame, at times that jitter by
+        // a millisecond or so. Against a continuous clock a frame whose due time falls near
+        // one of those requests is shown either now or a frame late, at random. Counting
+        // display refreshes instead gives every refresh exactly one new frame of a 59.94 fps
+        // video; the half refresh added keeps the due time away from the count's edge.
+        if (m_start_vblank.has_value() && !m_is_paused.load()) {
+            if (const auto vblank = CurrentVblank(); vblank && *vblank >= *m_start_vblank) {
+                const s64 refresh_us = 1001000 / 60;
+                elapsed = s64(*vblank - *m_start_vblank) * refresh_us + refresh_us / 2 -
+                          duration_cast<microseconds>(m_pause_duration).count();
+            }
+        }
     }
     elapsed /= 1000;
     if (elapsed <= 0) {

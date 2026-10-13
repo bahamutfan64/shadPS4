@@ -262,6 +262,8 @@ private:
     std::optional<u64> m_last_audio_ts{};
     std::optional<std::chrono::high_resolution_clock::time_point> m_last_data_time{};
     std::optional<std::chrono::high_resolution_clock::time_point> m_start_time{};
+    /// Display refresh count when playback started; set when the refresh-count clock is in use.
+    std::optional<u64> m_start_vblank{};
     std::chrono::high_resolution_clock::time_point m_pause_time{};
     std::chrono::high_resolution_clock::duration m_pause_duration{};
 };
