@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <limits>
 #include <xxhash.h>
 
@@ -11,6 +12,7 @@
 #include "common/hash.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
+#include "video_core/amdgpu/tiling.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -71,6 +73,19 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 
 TextureCache::~TextureCache() = default;
 
+/// A small render target in a macro-tiled layout that the guest may read on the CPU. Unreal
+/// Engine draws its sky-light irradiance table into a 9x1 half-float target (2D thin tiling,
+/// pitch 128) and then detiles that target's memory itself. Without a read-back it converts
+/// whatever the memory held before: in Matterfall, leftover block-compressed texture data,
+/// which lit level 1-1 pink and tinted every surface by its direction. Micro-tiled images are
+/// left out on purpose: the game also has small CPU-written images in that layout.
+static bool IsSmallMacroTiledTarget(const ImageInfo& info) {
+    return info.props.is_tiled && AmdGpu::IsMacroTiled(info.array_mode) && info.size.width <= 64 &&
+           info.size.height <= 8 && info.size.depth == 1 && info.resources.layers == 1 &&
+           info.resources.levels == 1 && info.num_samples == 1 && !info.props.is_block &&
+           !info.props.is_depth && info.guest_address != 0;
+}
+
 void TextureCache::ProcessDownloadImages() {
     std::unique_lock lk{download_images_mutex};
     for (const ImageId image_id : download_images) {
@@ -82,6 +97,42 @@ void TextureCache::ProcessDownloadImages() {
 void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     Image& image = slot_images[image_id];
     if (False(image.flags & ImageFlagBits::GpuModified)) {
+        return;
+    }
+    if (IsSmallMacroTiledTarget(image.info)) {
+        const auto& info = image.info;
+        const auto& mip_info = info.mips_layout[0];
+        const auto tiled =
+            runtime.GetStagingPool().Request(info.guest_size, MemoryType::HostCached, 256);
+        vk::BufferImageCopy copy{
+            .bufferOffset = mip_info.offset,
+            .bufferRowLength = mip_info.pitch,
+            .bufferImageHeight = mip_info.height,
+            .imageSubresource{
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {info.size.width, info.size.height, 1},
+        };
+        tile_manager.TileImage(image, std::span{&copy, 1}, tiled.buffer, tiled.offset);
+        scheduler.Finish();
+        tiled.Invalidate();
+        static std::atomic<u32> reported{};
+        if (reported.fetch_add(1) < 60) {
+            u32 non_zero = 0;
+            for (u64 i = 0; i < info.guest_size; ++i) {
+                non_zero += tiled.mapped[i] != 0;
+            }
+            LOG_INFO(Render_Vulkan,
+                     "Read back small macro-tiled target {}x{} {} at {:#x} ({} bytes, {} non-zero)",
+                     info.size.width, info.size.height, vk::to_string(info.pixel_format),
+                     info.guest_address, info.guest_size, non_zero);
+        }
+        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(info.guest_address),
+                                                  tiled.mapped, info.guest_size);
         return;
     }
     const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
@@ -674,7 +725,24 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
-    if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
+    if (desc.info.size.width == 9 && desc.info.size.height == 1) {
+        // Diagnostic: how a 9x1 render target request is resolved.
+        static std::atomic<u32> reported{};
+        if (reported.fetch_add(1) < 40) {
+            LOG_INFO(Render_Vulkan,
+                     "9x1 target requested at {:#x} size {:#x} tile {} pitch {} {} -> image "
+                     "{}x{}x{} layers {} levels {} at {:#x} size {:#x} tile {} {}",
+                     desc.info.guest_address, desc.info.guest_size,
+                     static_cast<u32>(desc.info.tile_mode), desc.info.pitch,
+                     vk::to_string(desc.info.pixel_format), image.info.size.width,
+                     image.info.size.height, image.info.size.depth, image.info.resources.layers,
+                     image.info.resources.levels, image.info.guest_address,
+                     image.info.guest_size, static_cast<u32>(image.info.tile_mode),
+                     vk::to_string(image.info.pixel_format));
+        }
+    }
+    if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8 ||
+                                   IsSmallMacroTiledTarget(image.info))) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
     }
