@@ -704,6 +704,82 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             }
         }
         RegisterImage(image_id);
+
+        // Cached images that are a mip level and slice of the image just created. ResolveOverlap
+        // only merges such a sub-image when the larger image already exists; when it does not,
+        // the sub-image used to be left registered next to the new image. A later request that
+        // matched it exactly then kept drawing into the orphan. Matterfall reduces its sky
+        // cube this way: the sixth face of one level went to an orphan, the cube kept junk
+        // there, and the sky irradiance table came out saturated. Merge and free them now.
+        // SHADPS4_MERGE_SUBIMAGES=0 restores the old behaviour.
+        static const bool merge_sub_images = [] {
+            const char* const value = std::getenv("SHADPS4_MERGE_SUBIMAGES");
+            return value == nullptr || value[0] != '0';
+        }();
+        if (merge_sub_images) {
+            bool uploaded = false;
+            for (const ImageId cache_id : image_ids) {
+                if (cache_id == image_id) {
+                    continue;
+                }
+                Image& cache_image = slot_images[cache_id];
+                if (False(cache_image.flags & ImageFlagBits::Registered) ||
+                    cache_image.info.guest_address < info.guest_address) {
+                    continue;
+                }
+                const s32 mip = cache_image.info.MipOf(info);
+                if (mip < 0 || (mip == 0 && cache_image.info.guest_address == info.guest_address)) {
+                    continue;
+                }
+                const s32 slice = cache_image.info.SliceOf(info, mip);
+                if (slice < 0) {
+                    continue;
+                }
+                Image& new_image = slot_images[image_id];
+                const u32 src_dim = cache_image.info.props.is_block ? 2 : 0;
+                const u32 dst_dim = new_image.info.props.is_block ? 2 : 0;
+                const bool lines_up =
+                    std::max(new_image.info.size.width >> (mip + dst_dim), 1u) ==
+                        (cache_image.info.size.width >> src_dim) &&
+                    std::max(new_image.info.size.height >> (mip + dst_dim), 1u) ==
+                        (cache_image.info.size.height >> src_dim) &&
+                    std::max<u32>(new_image.info.mips_layout[mip].pitch >> dst_dim, 1u) ==
+                        (cache_image.info.pitch >> src_dim) &&
+                    slice + cache_image.info.resources.layers <= new_image.info.resources.layers;
+                const bool drawn = True(cache_image.flags & ImageFlagBits::GpuModified);
+                static std::atomic<u32> reported{};
+                if (reported.fetch_add(1) < 40) {
+                    LOG_INFO(Render_Vulkan,
+                             "Sub-image {}x{} L{} at {:#x} is mip {} slice {} of new image {}x{} "
+                             "L{} M{} at {:#x}: {}",
+                             cache_image.info.size.width, cache_image.info.size.height,
+                             cache_image.info.resources.layers, cache_image.info.guest_address,
+                             mip, slice, info.size.width, info.size.height, info.resources.layers,
+                             info.resources.levels, info.guest_address,
+                             drawn ? (lines_up ? "merged" : "left alone (does not line up)")
+                                   : "freed (not drawn to)");
+                }
+                if (drawn && !lines_up) {
+                    // Keep the old behaviour for a case this cannot copy.
+                    continue;
+                }
+                if (drawn && lines_up) {
+                    if (!uploaded) {
+                        // Bring in the guest's data first, or the first upload would overwrite
+                        // what is copied here.
+                        UpdateImage(image_id);
+                        uploaded = true;
+                    }
+                    runtime.CopyMip(&cache_image, &new_image, mip, slice);
+                    new_image.flags |= ImageFlagBits::GpuModified;
+                }
+                if (cache_image.binding.is_target) {
+                    cache_image.binding.needs_rebind = 1u;
+                    new_image.binding.is_target = 1u;
+                }
+                FreeImage(cache_id);
+            }
+        }
     }
 
     Image& image = slot_images[image_id];
