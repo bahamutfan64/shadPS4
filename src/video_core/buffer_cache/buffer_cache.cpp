@@ -3,6 +3,10 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
+#include <set>
+#include <string>
+#include <utility>
 #include <magic_enum/magic_enum.hpp>
 
 #include "common/alignment.h"
@@ -170,6 +174,30 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     download.buffer->Invalidate(download.offset, download.size);
     for (const auto& copy : copies) {
         auto* dst_addr = std::bit_cast<u8*>(arena_base + copy.srcOffset);
+        {
+            // Diagnostic: every distinct range the guest gets back from the GPU, what it held
+            // before and after, and which images live there.
+            static std::set<std::pair<u64, u64>> seen;
+            static u32 total = 0;
+            ++total;
+            if (seen.size() < 160 && seen.emplace(arena_base + copy.srcOffset, copy.size).second) {
+                const u8* const fresh = download.mapped + (copy.dstOffset - download.offset);
+                // The guest range itself is not read here: it may be read-protected, and a
+                // fault on this thread would re-enter the read-back.
+                std::string after;
+                for (u64 i = 0; i + 4 <= std::min<u64>(copy.size, 48); i += 4) {
+                    u32 word;
+                    std::memcpy(&word, fresh + i, 4);
+                    after += fmt::format("{:08x} ", word);
+                }
+                LOG_INFO(Render_Vulkan,
+                         "GPU read-back #{} to {:#x} size {:#x} (request {:#x}+{:#x}) | gpu gives: "
+                         "{}| images:{}",
+                         total, arena_base + copy.srcOffset, copy.size, device_addr, size, after,
+                         texture_cache.DescribeImagesInRange(arena_base + copy.srcOffset,
+                                                             copy.size));
+            }
+        }
         memory->TryWriteBacking(dst_addr, download.mapped + (copy.dstOffset - download.offset),
                                 copy.size);
     }

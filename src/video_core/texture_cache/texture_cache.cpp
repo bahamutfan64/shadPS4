@@ -630,6 +630,21 @@ void TextureCache::MarkAccessed(ImageId image_id) {
     TouchImage(image);
 }
 
+std::string TextureCache::DescribeImagesInRange(VAddr address, size_t size) {
+    std::string out;
+    ForEachImageInRegion(address, size, [&](ImageId, Image& image) {
+        const auto& info = image.info;
+        out += fmt::format(" [{}x{}x{} layers {} levels {} {} at {:#x} size {:#x} tile {} {}]",
+                           info.size.width, info.size.height, info.size.depth,
+                           info.resources.layers, info.resources.levels,
+                           vk::to_string(info.pixel_format), info.guest_address, info.guest_size,
+                           static_cast<u32>(info.tile_mode),
+                           True(image.flags & ImageFlagBits::GpuModified) ? "gpu-modified"
+                                                                          : "not gpu-modified");
+    });
+    return out.empty() ? " none" : out;
+}
+
 ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure_valid) {
     SmallVector<ImageId, 4> image_ids;
     ForEachImageWithAddress(address, [&](ImageId image_id, Image& image) {
