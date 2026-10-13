@@ -76,10 +76,6 @@ public:
 
     void FlushBarriers();
 
-    /// Experiment: fills every level and layer of a new colour image with zero, leaving its
-    /// flags alone so that guest data is still uploaded over it.
-    void ZeroNewImage(VideoCore::Image* image);
-
 private:
     void MakeCurrent(const VideoCore::Buffer* handle);
 

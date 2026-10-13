@@ -1,10 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <cstdlib>
-#include <atomic>
 #include <limits>
-#include <thread>
 #include <xxhash.h>
 
 #include "common/assert.h"
@@ -14,7 +11,6 @@
 #include "common/hash.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
-#include "video_core/amdgpu/tiling.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -75,49 +71,7 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 
 TextureCache::~TextureCache() = default;
 
-/// A small render target in a macro-tiled layout that the guest may read on the CPU. Unreal
-/// Engine draws its sky-light irradiance table into a 9x1 half-float target (2D thin tiling,
-/// pitch 128) and then detiles that target's memory itself. Without a read-back it converts
-/// whatever the memory held before: in Matterfall, leftover block-compressed texture data,
-/// which lit level 1-1 pink and tinted every surface by its direction. Micro-tiled images are
-/// left out on purpose: the game also has small CPU-written images in that layout. Images up to
-/// 8 px wide keep the plain read-back they always had (the tiler filled a 1x1 target's whole
-/// allocation with junk, and the game takes its exposure from one).
-static std::atomic<std::thread::id> download_thread_id{};
-
-static bool IsSmallMacroTiledTarget(const ImageInfo& info) {
-    return info.props.is_tiled && AmdGpu::IsMacroTiled(info.array_mode) && info.size.width > 8 &&
-           info.size.width <= 64 &&
-           info.size.height <= 8 && info.size.depth == 1 && info.resources.layers == 1 &&
-           info.resources.levels == 1 && info.num_samples == 1 && !info.props.is_block &&
-           !info.props.is_depth && info.guest_address != 0;
-}
-
-/// Diagnostic trace of the sky irradiance passes: counts down while bindings are logged.
-static std::atomic<s32> sky_trace_left{0};
-static std::atomic<u64> sky_trace_first_address{0};
-
-static void TraceSkyBinding(const char* kind, const ImageInfo& want, const ImageViewInfo& view,
-                            const Image& image) {
-    if (sky_trace_left.load(std::memory_order_relaxed) <= 0) {
-        return;
-    }
-    sky_trace_left.fetch_sub(1, std::memory_order_relaxed);
-    LOG_INFO(Render_Vulkan,
-             "SKY {} want {}x{}x{} L{} M{} {} at {:#x} | view type {} fmt {} level {}+{} layer "
-             "{}+{} map {}{}{}{} | image {}x{} L{} M{} at {:#x}",
-             kind, want.size.width, want.size.height, want.size.depth, want.resources.layers,
-             want.resources.levels, vk::to_string(want.pixel_format), want.guest_address,
-             static_cast<u32>(view.type), vk::to_string(view.format), view.range.base.level,
-             view.range.extent.levels, view.range.base.layer, view.range.extent.layers,
-             static_cast<u32>(view.mapping.r), static_cast<u32>(view.mapping.g),
-             static_cast<u32>(view.mapping.b), static_cast<u32>(view.mapping.a),
-             image.info.size.width, image.info.size.height, image.info.resources.layers,
-             image.info.resources.levels, image.info.guest_address);
-}
-
 void TextureCache::ProcessDownloadImages() {
-    download_thread_id.store(std::this_thread::get_id(), std::memory_order_relaxed);
     std::unique_lock lk{download_images_mutex};
     for (const ImageId image_id : download_images) {
         DownloadImageMemory(image_id, true);
@@ -128,42 +82,6 @@ void TextureCache::ProcessDownloadImages() {
 void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     Image& image = slot_images[image_id];
     if (False(image.flags & ImageFlagBits::GpuModified)) {
-        return;
-    }
-    if (IsSmallMacroTiledTarget(image.info)) {
-        const auto& info = image.info;
-        const auto& mip_info = info.mips_layout[0];
-        const auto tiled =
-            runtime.GetStagingPool().Request(info.guest_size, MemoryType::HostCached, 256);
-        vk::BufferImageCopy copy{
-            .bufferOffset = mip_info.offset,
-            .bufferRowLength = mip_info.pitch,
-            .bufferImageHeight = mip_info.height,
-            .imageSubresource{
-                .aspectMask = vk::ImageAspectFlagBits::eColor,
-                .mipLevel = 0,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-            .imageOffset = {0, 0, 0},
-            .imageExtent = {info.size.width, info.size.height, 1},
-        };
-        tile_manager.TileImage(image, std::span{&copy, 1}, tiled.buffer, tiled.offset);
-        scheduler.Finish();
-        tiled.Invalidate();
-        static std::atomic<u32> reported{};
-        if (reported.fetch_add(1) < 60) {
-            u32 non_zero = 0;
-            for (u64 i = 0; i < info.guest_size; ++i) {
-                non_zero += tiled.mapped[i] != 0;
-            }
-            LOG_INFO(Render_Vulkan,
-                     "Read back small macro-tiled target {}x{} {} at {:#x} ({} bytes, {} non-zero)",
-                     info.size.width, info.size.height, vk::to_string(info.pixel_format),
-                     info.guest_address, info.guest_size, non_zero);
-        }
-        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(info.guest_address),
-                                                  tiled.mapped, info.guest_size);
         return;
     }
     const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
@@ -688,98 +606,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     // Create and register a new image
     if (!image_id) {
         image_id = slot_images.Insert(instance, runtime, slot_image_views, info);
-        {
-            // Experiment (SHADPS4_ZERO_NEW_IMAGES=1): a new image starts with whatever the host
-            // GPU memory held. Matterfall's sky irradiance table comes out saturated; this
-            // tests whether an image in that chain is read before the guest draws to it.
-            static const bool zero_new_images = [] {
-                const char* const value = std::getenv("SHADPS4_ZERO_NEW_IMAGES");
-                return value != nullptr && value[0] == '1';
-            }();
-            Image& new_image = slot_images[image_id];
-            if (zero_new_images && new_image.info.pixel_format != vk::Format::eUndefined &&
-                !new_image.info.props.is_depth && !new_image.info.props.is_block &&
-                new_image.info.num_samples == 1) {
-                runtime.ZeroNewImage(&new_image);
-            }
-        }
         RegisterImage(image_id);
-
-        // Cached images that are a mip level and slice of the image just created. ResolveOverlap
-        // only merges such a sub-image when the larger image already exists; when it does not,
-        // the sub-image used to be left registered next to the new image. A later request that
-        // matched it exactly then kept drawing into the orphan. Matterfall reduces its sky
-        // cube this way: the sixth face of one level went to an orphan, the cube kept junk
-        // there, and the sky irradiance table came out saturated. Merge and free them now.
-        // SHADPS4_MERGE_SUBIMAGES=0 restores the old behaviour.
-        static const bool merge_sub_images = [] {
-            const char* const value = std::getenv("SHADPS4_MERGE_SUBIMAGES");
-            return value == nullptr || value[0] != '0';
-        }();
-        if (merge_sub_images) {
-            bool uploaded = false;
-            for (const ImageId cache_id : image_ids) {
-                if (cache_id == image_id) {
-                    continue;
-                }
-                Image& cache_image = slot_images[cache_id];
-                if (False(cache_image.flags & ImageFlagBits::Registered) ||
-                    cache_image.info.guest_address < info.guest_address) {
-                    continue;
-                }
-                const s32 mip = cache_image.info.MipOf(info);
-                if (mip < 0 || (mip == 0 && cache_image.info.guest_address == info.guest_address)) {
-                    continue;
-                }
-                const s32 slice = cache_image.info.SliceOf(info, mip);
-                if (slice < 0) {
-                    continue;
-                }
-                Image& new_image = slot_images[image_id];
-                const u32 src_dim = cache_image.info.props.is_block ? 2 : 0;
-                const u32 dst_dim = new_image.info.props.is_block ? 2 : 0;
-                const bool lines_up =
-                    std::max(new_image.info.size.width >> (mip + dst_dim), 1u) ==
-                        (cache_image.info.size.width >> src_dim) &&
-                    std::max(new_image.info.size.height >> (mip + dst_dim), 1u) ==
-                        (cache_image.info.size.height >> src_dim) &&
-                    std::max<u32>(new_image.info.mips_layout[mip].pitch >> dst_dim, 1u) ==
-                        (cache_image.info.pitch >> src_dim) &&
-                    slice + cache_image.info.resources.layers <= new_image.info.resources.layers;
-                const bool drawn = True(cache_image.flags & ImageFlagBits::GpuModified);
-                static std::atomic<u32> reported{};
-                if (reported.fetch_add(1) < 40) {
-                    LOG_INFO(Render_Vulkan,
-                             "Sub-image {}x{} L{} at {:#x} is mip {} slice {} of new image {}x{} "
-                             "L{} M{} at {:#x}: {}",
-                             cache_image.info.size.width, cache_image.info.size.height,
-                             cache_image.info.resources.layers, cache_image.info.guest_address,
-                             mip, slice, info.size.width, info.size.height, info.resources.layers,
-                             info.resources.levels, info.guest_address,
-                             drawn ? (lines_up ? "merged" : "left alone (does not line up)")
-                                   : "freed (not drawn to)");
-                }
-                if (drawn && !lines_up) {
-                    // Keep the old behaviour for a case this cannot copy.
-                    continue;
-                }
-                if (drawn && lines_up) {
-                    if (!uploaded) {
-                        // Bring in the guest's data first, or the first upload would overwrite
-                        // what is copied here.
-                        UpdateImage(image_id);
-                        uploaded = true;
-                    }
-                    runtime.CopyMip(&cache_image, &new_image, mip, slice);
-                    new_image.flags |= ImageFlagBits::GpuModified;
-                }
-                if (cache_image.binding.is_target) {
-                    cache_image.binding.needs_rebind = 1u;
-                    new_image.binding.is_target = 1u;
-                }
-                FreeImage(cache_id);
-            }
-        }
     }
 
     Image& image = slot_images[image_id];
@@ -832,8 +659,6 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
 
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
-    TraceSkyBinding(desc.type == BindingType::Storage ? "storage" : "texture", desc.info,
-                    desc.view_info, image);
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
@@ -849,36 +674,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
-    if (desc.info.size.width == 9 && desc.info.size.height == 1) {
-        u64 expected = 0;
-        if (!sky_trace_first_address.compare_exchange_strong(expected, desc.info.guest_address) &&
-            expected != desc.info.guest_address) {
-            // A second sky table: the level's. Trace the passes for the remaining coefficients.
-            static std::atomic<bool> started{false};
-            if (!started.exchange(true)) {
-                sky_trace_left.store(700, std::memory_order_relaxed);
-            }
-        }
-    }
-    TraceSkyBinding("TARGET ", desc.info, desc.view_info, image);
-    if (desc.info.size.width == 9 && desc.info.size.height == 1) {
-        // Diagnostic: how a 9x1 render target request is resolved.
-        static std::atomic<u32> reported{};
-        if (reported.fetch_add(1) < 40) {
-            LOG_INFO(Render_Vulkan,
-                     "9x1 target requested at {:#x} size {:#x} tile {} pitch {} {} -> image "
-                     "{}x{}x{} layers {} levels {} at {:#x} size {:#x} tile {} {}",
-                     desc.info.guest_address, desc.info.guest_size,
-                     static_cast<u32>(desc.info.tile_mode), desc.info.pitch,
-                     vk::to_string(desc.info.pixel_format), image.info.size.width,
-                     image.info.size.height, image.info.size.depth, image.info.resources.layers,
-                     image.info.resources.levels, image.info.guest_address,
-                     image.info.guest_size, static_cast<u32>(image.info.tile_mode),
-                     vk::to_string(image.info.pixel_format));
-        }
-    }
-    if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8 ||
-                                   IsSmallMacroTiledTarget(image.info))) {
+    if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
     }
@@ -1285,26 +1081,9 @@ void TextureCache::DeleteImage(ImageId image_id) {
     }
 
     {
-        bool pending = false;
-        {
-            std::unique_lock lk{download_images_mutex};
-            if (download_images.contains(image_id)) {
-                download_images.erase(image_id);
-                pending = true;
-            }
-        }
-        // A small target that is deleted before its read-back ran would lose what was drawn:
-        // Matterfall's sky table is drawn, read by the guest and released within one submit.
-        if (pending && IsSmallMacroTiledTarget(image.info)) {
-            const bool on_download_thread =
-                download_thread_id.load(std::memory_order_relaxed) == std::this_thread::get_id();
-            LOG_INFO(Render_Vulkan,
-                     "Target {}x{} at {:#x} deleted with a read-back pending: {}",
-                     image.info.size.width, image.info.size.height, image.info.guest_address,
-                     on_download_thread ? "reading back now" : "dropped (other thread)");
-            if (on_download_thread) {
-                DownloadImageMemory(image_id, true);
-            }
+        std::unique_lock lk{download_images_mutex};
+        if (download_images.contains(image_id)) {
+            download_images.erase(image_id);
         }
     }
 

@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <array>
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -600,24 +599,6 @@ void Runtime::ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRang
 
     dst->flags |= VideoCore::ImageFlagBits::GpuModified;
     dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
-}
-
-void Runtime::ZeroNewImage(VideoCore::Image* image) {
-    scheduler.EndRendering();
-    if (Transit(image, vk::ImageLayout::eTransferDstOptimal, vk::PipelineStageFlagBits2::eClear,
-                vk::AccessFlagBits2::eTransferWrite, {})) {
-        FlushBarriers();
-    }
-    const vk::ImageSubresourceRange range = {
-        .aspectMask = vk::ImageAspectFlagBits::eColor,
-        .baseMipLevel = 0,
-        .levelCount = VK_REMAINING_MIP_LEVELS,
-        .baseArrayLayer = 0,
-        .layerCount = VK_REMAINING_ARRAY_LAYERS,
-    };
-    const vk::ClearColorValue zero{std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}};
-    scheduler.CommandBuffer().clearColorImage(image->GetImage(),
-                                              vk::ImageLayout::eTransferDstOptimal, zero, range);
 }
 
 void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool copy_backing) {
