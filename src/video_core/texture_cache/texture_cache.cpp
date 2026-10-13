@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <limits>
+#include <thread>
 #include <xxhash.h>
 
 #include "common/assert.h"
@@ -78,15 +79,21 @@ TextureCache::~TextureCache() = default;
 /// pitch 128) and then detiles that target's memory itself. Without a read-back it converts
 /// whatever the memory held before: in Matterfall, leftover block-compressed texture data,
 /// which lit level 1-1 pink and tinted every surface by its direction. Micro-tiled images are
-/// left out on purpose: the game also has small CPU-written images in that layout.
+/// left out on purpose: the game also has small CPU-written images in that layout. Images up to
+/// 8 px wide keep the plain read-back they always had (the tiler filled a 1x1 target's whole
+/// allocation with junk, and the game takes its exposure from one).
+static std::atomic<std::thread::id> download_thread_id{};
+
 static bool IsSmallMacroTiledTarget(const ImageInfo& info) {
-    return info.props.is_tiled && AmdGpu::IsMacroTiled(info.array_mode) && info.size.width <= 64 &&
+    return info.props.is_tiled && AmdGpu::IsMacroTiled(info.array_mode) && info.size.width > 8 &&
+           info.size.width <= 64 &&
            info.size.height <= 8 && info.size.depth == 1 && info.resources.layers == 1 &&
            info.resources.levels == 1 && info.num_samples == 1 && !info.props.is_block &&
            !info.props.is_depth && info.guest_address != 0;
 }
 
 void TextureCache::ProcessDownloadImages() {
+    download_thread_id.store(std::this_thread::get_id(), std::memory_order_relaxed);
     std::unique_lock lk{download_images_mutex};
     for (const ImageId image_id : download_images) {
         DownloadImageMemory(image_id, true);
@@ -1149,9 +1156,26 @@ void TextureCache::DeleteImage(ImageId image_id) {
     }
 
     {
-        std::unique_lock lk{download_images_mutex};
-        if (download_images.contains(image_id)) {
-            download_images.erase(image_id);
+        bool pending = false;
+        {
+            std::unique_lock lk{download_images_mutex};
+            if (download_images.contains(image_id)) {
+                download_images.erase(image_id);
+                pending = true;
+            }
+        }
+        // A small target that is deleted before its read-back ran would lose what was drawn:
+        // Matterfall's sky table is drawn, read by the guest and released within one submit.
+        if (pending && IsSmallMacroTiledTarget(image.info)) {
+            const bool on_download_thread =
+                download_thread_id.load(std::memory_order_relaxed) == std::this_thread::get_id();
+            LOG_INFO(Render_Vulkan,
+                     "Target {}x{} at {:#x} deleted with a read-back pending: {}",
+                     image.info.size.width, image.info.size.height, image.info.guest_address,
+                     on_download_thread ? "reading back now" : "dropped (other thread)");
+            if (on_download_thread) {
+                DownloadImageMemory(image_id, true);
+            }
         }
     }
 
