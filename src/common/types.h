@@ -25,7 +25,11 @@ static_assert(sizeof(u128) == 16, "u128 must be 128 bits wide");
 using VAddr = uintptr_t;
 using PAddr = uintptr_t;
 
-#define PS4_SYSV_ABI __attribute__((sysv_abi))
+// force_align_arg_pointer: guest code may call into the emulator with a stack that is not 16-byte
+// aligned (DRIVECLUB does after loading oskGNMm.prx). The host compiler assumes alignment and
+// faults on the first aligned SSE spill, so every function the guest can call realigns its stack.
+// On function pointer types the attribute is accepted and has no effect.
+#define PS4_SYSV_ABI __attribute__((sysv_abi, force_align_arg_pointer))
 
 // UDLs for memory size values
 constexpr unsigned long long operator""_KB(unsigned long long x) {
