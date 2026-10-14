@@ -58,6 +58,17 @@ public:
         intervals.reserve(n);
     }
 
+    /// Replaces the list with one interval spanning all of it. For callers that only ask whether
+    /// anything overlaps, answers can only become more conservative, and Add stays cheap.
+    void CollapseToHull() {
+        if (intervals.size() < 2) {
+            return;
+        }
+        const IV hull = intervals.front().SubRange(intervals.front().start, intervals.back().end);
+        intervals.clear();
+        intervals.push_back(hull);
+    }
+
     /// Adds a range to the interval set.
     void Add(IV value) {
         if (value.start >= value.end) [[unlikely]] {

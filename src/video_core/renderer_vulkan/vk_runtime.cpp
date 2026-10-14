@@ -716,6 +716,18 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         resource->read_ranges.Add(range);
     }
 
+    // Every buffer lives in one arena, so a frame that touches thousands of scattered ranges
+    // between barriers made each Add shift the whole sorted vector (Concrete Genie's menus ran
+    // at 10 fps with the GPU thread in memmove). The lists only answer "does this overlap an
+    // earlier access", so past this size one covering range is enough: it can only add barriers.
+    constexpr std::size_t MaxTrackedRanges = 256;
+    if (resource->write_ranges.Size() > MaxTrackedRanges) {
+        resource->write_ranges.CollapseToHull();
+    }
+    if (resource->read_ranges.Size() > MaxTrackedRanges) {
+        resource->read_ranges.CollapseToHull();
+    }
+
     memory_barrier.srcStageMask |= src_stage;
     memory_barrier.srcAccessMask |= src_access & WRITE_MASK;
 }
