@@ -12,7 +12,8 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 9u;
+// 10: our shader changes (LDS bounds) plus 0.20.0's (instance id unbias, fp64 detection).
+static constexpr u32 ShaderBinaryVersion = 10u;
 static constexpr u32 ShaderMetaVersion = 8u;
 static constexpr u32 PipelineKeyVersion = 3u;
 } // namespace Serialization
