@@ -173,6 +173,17 @@ void Linker::Execute(const std::vector<std::string>& args) {
         // Have libSceSysmodule preload our libraries.
         Libraries::SysModule::sceSysmodulePreloadModuleForLibkernel();
 
+        // Some games link libSceNgs2 directly and never ask libSceSysmodule for it (Concrete
+        // Genie: Unreal's Audio3d mixer). The PS4 loader brings it in as a needed module; without
+        // this every sceNgs2 call hits a zero-returning stub and the game is silent. Loading it
+        // through sysmodule picks the LLE copy from sys_modules, or the HLE fallback.
+        constexpr s32 SysmoduleNgs2 = 0xb;
+        const auto links_ngs2 = [](const ModuleInfo& m) { return m.name == "libSceNgs2"; };
+        if (std::ranges::any_of(module->GetImportModules(), links_ngs2)) {
+            LOG_INFO(Core_Linker, "Executable links libSceNgs2 directly, loading it at startup");
+            Libraries::SysModule::loadModule(SysmoduleNgs2, 0, nullptr, nullptr);
+        }
+
         // Load and start custom modules from the user directory.
         std::string_view id = Common::ElfInfo::Instance().GameSerial();
         const auto& custom_mod_directory =
