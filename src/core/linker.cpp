@@ -77,9 +77,18 @@ void Linker::Execute(const std::vector<std::string>& args) {
     Module* module = m_modules[0].get();
     static_tls_size = module->tls.offset = module->tls.image_size;
 
-    // Map libSceLibcInternal
-    const auto& libc_internal_path =
-        EmulatorSettings.GetSysModulesDir() / "libSceLibcInternal.sprx";
+    // Map libSceLibcInternal. A copy in sys_modules\<serial>\ wins over the shared one, so one
+    // build can give it to the games that need it (MediEvil, Gravity Rush 2) without replacing
+    // the C library of every other game.
+    const auto& sys_modules_dir = EmulatorSettings.GetSysModulesDir();
+    const auto game_libc_internal_path = sys_modules_dir /
+                                         Common::ElfInfo::Instance().GameSerial() /
+                                         "libSceLibcInternal.sprx";
+    const auto libc_internal_path =
+        !Common::ElfInfo::Instance().GameSerial().empty() &&
+                std::filesystem::exists(game_libc_internal_path)
+            ? game_libc_internal_path
+            : sys_modules_dir / "libSceLibcInternal.sprx";
     bool has_libcinternal = false;
     if (std::filesystem::exists(libc_internal_path)) {
         LoadModule(libc_internal_path);
