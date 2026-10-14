@@ -9,6 +9,12 @@
 
 namespace Shader::Backend::SPIRV {
 
+// Size of the whole workgroup-memory allocation: the guest LDS size plus the scratch area the
+// recompiler appends after it (see EmitContext::DefineSharedMemory).
+inline u32 SharedMemoryAllocationSize(const EmitContext& ctx) {
+    return ctx.runtime_info.hw.cs.shared_memory_size + ctx.info.shared_memory_scratch_size;
+}
+
 inline Id SharedMemoryAccessInBounds(EmitContext& ctx, Id byte_offset, u32 allocation_size,
                                      u32 access_size) {
     ASSERT(access_size > 0);

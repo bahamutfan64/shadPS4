@@ -10,7 +10,7 @@ namespace Shader::Backend::SPIRV {
 Id EmitLoadSharedU16(EmitContext& ctx, Id offset) {
     const Id shift_id{ctx.ConstU32(1U)};
     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
-    return EmitCheckedSharedResult(ctx, offset, ctx.runtime_info.cs_info.shared_memory_size, 2u,
+    return EmitCheckedSharedResult(ctx, offset, SharedMemoryAllocationSize(ctx), 2u,
                                    ctx.U16, ctx.u16_zero_value, [&] {
                                        const Id pointer = ctx.EmitSharedMemoryAccess(
                                            ctx.shared_u16, ctx.shared_memory_u16, index);
@@ -21,7 +21,7 @@ Id EmitLoadSharedU16(EmitContext& ctx, Id offset) {
 Id EmitLoadSharedU32(EmitContext& ctx, Id offset) {
     const Id shift_id{ctx.ConstU32(2U)};
     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
-    return EmitCheckedSharedResult(ctx, offset, ctx.runtime_info.cs_info.shared_memory_size, 4u,
+    return EmitCheckedSharedResult(ctx, offset, SharedMemoryAllocationSize(ctx), 4u,
                                    ctx.U32[1], ctx.u32_zero_value, [&] {
                                        const Id pointer = ctx.EmitSharedMemoryAccess(
                                            ctx.shared_u32, ctx.shared_memory_u32, index);
@@ -32,7 +32,7 @@ Id EmitLoadSharedU32(EmitContext& ctx, Id offset) {
 Id EmitLoadSharedU64(EmitContext& ctx, Id offset) {
     const Id shift_id{ctx.ConstU32(3U)};
     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
-    return EmitCheckedSharedResult(ctx, offset, ctx.runtime_info.cs_info.shared_memory_size, 8u,
+    return EmitCheckedSharedResult(ctx, offset, SharedMemoryAllocationSize(ctx), 8u,
                                    ctx.U64, ctx.u64_zero_value, [&] {
                                        const Id pointer = ctx.EmitSharedMemoryAccess(
                                            ctx.shared_u64, ctx.shared_memory_u64, index);
@@ -43,7 +43,7 @@ Id EmitLoadSharedU64(EmitContext& ctx, Id offset) {
 void EmitWriteSharedU16(EmitContext& ctx, Id offset, Id value) {
     const Id shift{ctx.ConstU32(1U)};
     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift)};
-    EmitCheckedSharedWrite(ctx, offset, ctx.runtime_info.cs_info.shared_memory_size, 2u, [&] {
+    EmitCheckedSharedWrite(ctx, offset, SharedMemoryAllocationSize(ctx), 2u, [&] {
         const Id pointer = ctx.EmitSharedMemoryAccess(ctx.shared_u16, ctx.shared_memory_u16, index);
         ctx.OpStore(pointer, value);
     });
@@ -52,7 +52,7 @@ void EmitWriteSharedU16(EmitContext& ctx, Id offset, Id value) {
 void EmitWriteSharedU32(EmitContext& ctx, Id offset, Id value) {
     const Id shift{ctx.ConstU32(2U)};
     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift)};
-    EmitCheckedSharedWrite(ctx, offset, ctx.runtime_info.cs_info.shared_memory_size, 4u, [&] {
+    EmitCheckedSharedWrite(ctx, offset, SharedMemoryAllocationSize(ctx), 4u, [&] {
         const Id pointer = ctx.EmitSharedMemoryAccess(ctx.shared_u32, ctx.shared_memory_u32, index);
         ctx.OpStore(pointer, value);
     });
@@ -61,7 +61,7 @@ void EmitWriteSharedU32(EmitContext& ctx, Id offset, Id value) {
 void EmitWriteSharedU64(EmitContext& ctx, Id offset, Id value) {
     const Id shift{ctx.ConstU32(3U)};
     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift)};
-    EmitCheckedSharedWrite(ctx, offset, ctx.runtime_info.cs_info.shared_memory_size, 8u, [&] {
+    EmitCheckedSharedWrite(ctx, offset, SharedMemoryAllocationSize(ctx), 8u, [&] {
         const Id pointer = ctx.EmitSharedMemoryAccess(ctx.shared_u64, ctx.shared_memory_u64, index);
         ctx.OpStore(pointer, value);
     });

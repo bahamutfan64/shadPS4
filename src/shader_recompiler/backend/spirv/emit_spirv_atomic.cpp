@@ -22,7 +22,7 @@ Id SharedAtomicU32(EmitContext& ctx, Id offset, Id value,
     const Id shift_id{ctx.ConstU32(2U)};
     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
     return EmitCheckedSharedResult(
-        ctx, offset, ctx.runtime_info.cs_info.shared_memory_size, 4u, ctx.U32[1],
+        ctx, offset, SharedMemoryAllocationSize(ctx), 4u, ctx.U32[1],
         ctx.u32_zero_value, [&] {
             const Id pointer{
                 ctx.EmitSharedMemoryAccess(ctx.shared_u32, ctx.shared_memory_u32, index)};
@@ -36,7 +36,7 @@ Id SharedAtomicU32IncDec(EmitContext& ctx, Id offset,
     const Id shift_id{ctx.ConstU32(2U)};
     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
     return EmitCheckedSharedResult(
-        ctx, offset, ctx.runtime_info.cs_info.shared_memory_size, 4u, ctx.U32[1],
+        ctx, offset, SharedMemoryAllocationSize(ctx), 4u, ctx.U32[1],
         ctx.u32_zero_value, [&] {
             const Id pointer{
                 ctx.EmitSharedMemoryAccess(ctx.shared_u32, ctx.shared_memory_u32, index)};
@@ -50,7 +50,7 @@ Id SharedAtomicU64(EmitContext& ctx, Id offset, Id value,
     const Id shift_id{ctx.ConstU32(3U)};
     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
     return EmitCheckedSharedResult(
-        ctx, offset, ctx.runtime_info.cs_info.shared_memory_size, 8u, ctx.U64, ctx.u64_zero_value,
+        ctx, offset, SharedMemoryAllocationSize(ctx), 8u, ctx.U64, ctx.u64_zero_value,
         [&] {
             const Id pointer{
                 ctx.EmitSharedMemoryAccess(ctx.shared_u64, ctx.shared_memory_u64, index)};
@@ -64,7 +64,7 @@ Id SharedAtomicU64IncDec(EmitContext& ctx, Id offset,
     const Id shift_id{ctx.ConstU32(3U)};
     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
     return EmitCheckedSharedResult(
-        ctx, offset, ctx.runtime_info.cs_info.shared_memory_size, 8u, ctx.U64, ctx.u64_zero_value,
+        ctx, offset, SharedMemoryAllocationSize(ctx), 8u, ctx.U64, ctx.u64_zero_value,
         [&] {
             const Id pointer{
                 ctx.EmitSharedMemoryAccess(ctx.shared_u64, ctx.shared_memory_u64, index)};
