@@ -584,7 +584,7 @@ static u32 ProcessMixQueue(Port& port) {
         if (queue.empty())
             return;
 
-        // default gain is 0.0 — objects with no GAIN set are silent.
+        // An object whose GAIN was set to 0 is silent.
         if (gain == 0.0f) {
             AudioData data = queue.front();
             queue.pop_front();
@@ -688,7 +688,9 @@ static u32 ProcessMixQueue(Port& port) {
     mix_in(port.bed_queue, 1.0f);
 
     for (auto& [obj_id, obj] : port.objects) {
-        float gain = 0.0f;
+        // Objects that never set GAIN play at full volume. Defaulting to 0 muted every object of
+        // games that only send POSITION/PRIORITY/PASSTHROUGH (Concrete Genie, Dauntless menus).
+        float gain = 1.0f;
         const auto gain_key =
             static_cast<u32>(OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_GAIN);
         if (obj.persistent_attributes.contains(gain_key)) {

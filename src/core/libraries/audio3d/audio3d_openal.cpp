@@ -451,7 +451,8 @@ static bool EnsureSpatial(Port& port) {
 }
 
 static float GetObjectGain(const ObjectState& obj) {
-    float gain = 0.0f;
+    // Full volume unless the game set GAIN (see audio3d.cpp).
+    float gain = 1.0f;
     const auto gain_key = static_cast<u32>(OrbisAudio3dAttributeId::ORBIS_AUDIO3D_ATTRIBUTE_GAIN);
     if (obj.persistent_attributes.contains(gain_key)) {
         const auto& blob = obj.persistent_attributes.at(gain_key);
